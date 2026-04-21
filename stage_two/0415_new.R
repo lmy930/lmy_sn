@@ -3,8 +3,8 @@ library(mvtnorm)
 library(Rcpp)
 library(RcppArmadillo)
 
-# 编译 C++ 文件（确保 0416.cpp 与 R 脚本在同一目录下）
-Rcpp::sourceCpp("0416.cpp")
+# 编译 C++ 文件（确保 0415.cpp 与 R 脚本在同一目录下）
+Rcpp::sourceCpp("0415.cpp")
 
 # ==========================================
 # 1. 坐标处理与距离加权 (IDW) 模块
@@ -20,20 +20,24 @@ haversine_dist <- function(lon1, lat1, lon2, lat2) {
   return(R * c)
 }
 
-# 寻找空间中心站点，并重排坐标矩阵（目标站点设为第1行）
+# 需求1：寻找空间中心站点，并重排坐标矩阵（目标站点设为第1行）
 find_and_reorder_stations <- function(coords) {
   K <- nrow(coords)
+  if (K != 6) warning("输入站点数量不是6个，但代码仍会继续寻找中心点。")
+  
   dist_mat <- matrix(0, K, K)
   for (i in 1:K) {
     for (j in 1:K) {
       dist_mat[i, j] <- haversine_dist(coords[i,1], coords[i,2], coords[j,1], coords[j,2])
     }
   }
+  # 计算每个站点到其他站点的距离总和，最小的即为中心
   sum_dists <- rowSums(dist_mat)
   center_idx <- which.min(sum_dists)
   
   cat(sprintf("=> 选定第 %d 号站点为中心目标站点 (距离总和: %.2f km)\n", center_idx, sum_dists[center_idx]))
   
+  # 重排：把中心站点放在第1行，其余顺延
   new_order <- c(center_idx, setdiff(1:K, center_idx))
   return(coords[new_order, ])
 }
@@ -47,7 +51,7 @@ weighted_neighbors_idw <- function(data_list, coords, target_idx = 1, power = 2)
   distances <- sapply(ref_indices, function(i) {
     haversine_dist(lon_target, lat_target, coords[i, 1], coords[i, 2])
   })
-  distances[distances < 1e-6] <- 1e-6 
+  distances[distances < 1e-6] <- 1e-6 # 防止除零
   norm_weights <- (1 / (distances ^ power)) / sum(1 / (distances ^ power))
   
   ref_matrix <- matrix(0, nrow = nrow(data_list[[1]]), ncol = ncol(data_list[[1]]))
@@ -58,7 +62,7 @@ weighted_neighbors_idw <- function(data_list, coords, target_idx = 1, power = 2)
 }
 
 # ==========================================
-# 2. 4个变点的数据生成模块 (正常->异常A->正常->异常B->正常)
+# 2. 多变点时间序列生成模块
 # ==========================================
 # 局部分段协方差偏移函数
 apply_covariance_shift_segment <- function(X, start_idx, end_idx, cov_scale) {
@@ -70,6 +74,7 @@ apply_covariance_shift_segment <- function(X, start_idx, end_idx, cov_scale) {
     idx_pre <- 1:(start_idx - 1)
     mu_pre <- colMeans(X[idx_pre, , drop = FALSE])
   } else {
+    # 如果是从第一个点开始，直接取该段数据自身的均值作为中心化参考，避免越界
     mu_pre <- colMeans(X[start_idx:end_idx, , drop = FALSE])
   }
   
@@ -89,17 +94,19 @@ apply_covariance_shift_segment <- function(X, start_idx, end_idx, cov_scale) {
   return(X)
 }
 
-# 生成包含4个变点的空间数据
-generate_spatial_data_4cp <- function(n = 1000, p = 2, K_stations = 6, 
-                                      cp_locs = c(200, 400, 600, 800), 
-                                      shift_sizes = c(2.5, -3.0), # 异常A和异常B的偏移强度
+# 生成包含2个变点的空间数据（数据序列符合: 异常 + 正常 + 异常）
+generate_spatial_data_2cp <- function(n = 600, p = 2, K_stations = 6, 
+                                      cp_locs = c(200, 400), 
+                                      shift_sizes = c(2.5, -2.5), # 两个变点对应的偏移量
                                       anomaly_only = TRUE, scenario = "mean") {
   Sigma_eps <- outer(1:p, 1:p, function(i, j) 0.45 ^ abs(i - j))
   
+  # 适应 p=2 时的矩阵生成
   if (p == 2) {
-    A <- matrix(c(0.50, 0.08, 0.05, 0.45), p, p, byrow = TRUE)
+    A <- matrix(c(0.50, 0.08, 
+                  0.05, 0.45), p, p, byrow = TRUE)
   } else {
-    A <- diag(0.5, p)
+    A <- diag(0.5, p) # 保护性逻辑，退化处理
   }
   
   data_list <- vector("list", K_stations)
@@ -113,19 +120,22 @@ generate_spatial_data_4cp <- function(n = 1000, p = 2, K_stations = 6,
   
   stations_to_change <- if (anomaly_only) 1 else seq_len(K_stations)
   cp1 <- cp_locs[1]; cp2 <- cp_locs[2]
-  cp3 <- cp_locs[3]; cp4 <- cp_locs[4]
   
   for (i in stations_to_change) {
     X <- data_list[[i]]
     if (scenario == "mean") {
-      X[cp1:(cp2-1), ] <- sweep(X[cp1:(cp2-1), , drop=FALSE], 2, rep(shift_sizes[1], p), "+")
-      X[cp3:(cp4-1), ] <- sweep(X[cp3:(cp4-1), , drop=FALSE], 2, rep(shift_sizes[2], p), "+")
+      # 第一段异常（1 到 cp1-1）
+      X[1:(cp1-1), ] <- sweep(X[1:(cp1-1), , drop=FALSE], 2, rep(shift_sizes[1], p), "+")
+      # 第三段异常（cp2 到 n）
+      X[cp2:n, ] <- sweep(X[cp2:n, , drop=FALSE], 2, rep(shift_sizes[2], p), "+")
+      # 第二段(cp1 到 cp2-1) 保持正常的生成基准值不变，即表现为恢复正常
     } else if (scenario == "cov") {
-      X <- apply_covariance_shift_segment(X, cp1, cp2-1, cov_scale = shift_sizes[1])
-      X <- apply_covariance_shift_segment(X, cp3, cp4-1, cov_scale = shift_sizes[2])
+      # 协方差的 shift_sizes 对应缩放系数，例如 c(1.6, 2.2)
+      X <- apply_covariance_shift_segment(X, 1, cp1-1, cov_scale = shift_sizes[1])
+      X <- apply_covariance_shift_segment(X, cp2, n, cov_scale = shift_sizes[2])
     } else if (scenario == "multiparam") {
-      X[cp1:(cp2-1), 1] <- X[cp1:(cp2-1), 1] * shift_sizes[1] + shift_sizes[1]
-      X[cp3:(cp4-1), 1] <- X[cp3:(cp4-1), 1] * shift_sizes[2] + shift_sizes[2]
+      X[1:(cp1-1), 1] <- X[1:(cp1-1), 1] * shift_sizes[1] + shift_sizes[1]
+      X[cp2:n, 1] <- X[cp2:n, 1] * shift_sizes[2] + shift_sizes[2]
     }
     data_list[[i]] <- X
   }
@@ -133,9 +143,9 @@ generate_spatial_data_4cp <- function(n = 1000, p = 2, K_stations = 6,
 }
 
 # ==========================================
-# 3. 特征提取与变点检验逻辑
+# 3. 特征提取与多变点检验逻辑
 # ==========================================
-build_feature_matrix <- function(data_list, tau, L, scenario = "mean", coords = NULL) {
+build_feature_matrix <- function(data_list, tau, L = 100, scenario = "mean", coords = NULL) {
   K <- length(data_list); p <- ncol(data_list[[1]]); n <- nrow(data_list[[1]])
   start_idx <- max(1, tau - L + 1); end_idx <- min(n, tau + L)
   actual_L <- tau - start_idx + 1
@@ -173,7 +183,7 @@ build_feature_matrix <- function(data_list, tau, L, scenario = "mean", coords = 
   return(list(Z = Z, actual_L = actual_L, start_idx = start_idx, end_idx = end_idx))
 }
 
-test_anomaly_dwb <- function(data_list, tau, L, M, bandwidth, scenario = "mean", coords = NULL) {
+test_anomaly_dwb <- function(data_list, tau, L = 100, M = 500, bandwidth = 10, scenario = "mean", coords = NULL) {
   feat <- build_feature_matrix(data_list, tau, L, scenario, coords)
   if (is.null(feat)) return(NULL)
   out <- dwb_test_cpp(feat$Z, feat$actual_L, M, bandwidth)
@@ -190,7 +200,7 @@ detect_cp_stage1 <- function(target_mat, scenario) {
   }
 }
 
-scan_anomaly_statistics <- function(data_list, tau_grid, L, M, bandwidth, scenario, coords) {
+scan_anomaly_statistics <- function(data_list, tau_grid, L = 100, M = 200, bandwidth = 10, scenario = "mean", coords = NULL) {
   rows <- lapply(tau_grid, function(tau) {
     res <- test_anomaly_dwb(data_list, tau, L, M, bandwidth, scenario, coords)
     if (!is.null(res)) data.frame(tau=tau, S_obs=res$S_obs, S_boot_q95=res$S_boot_q95, p_value=res$p_value) else NULL
@@ -199,88 +209,64 @@ scan_anomaly_statistics <- function(data_list, tau_grid, L, M, bandwidth, scenar
 }
 
 # ==========================================
-# 4. 单次运行与绘图函数 (引入局部寻优机制)
+# 4. 单次运行与绘图函数 (多变点专属逻辑)
 # ==========================================
-run_case_4cp <- function(scenario = "mean", condition = "Anomaly", coords, n = 1000, p = 2, 
-                         cp_true = c(200, 400, 600, 800), shift_sizes = c(2.5, -2.5), 
-                         alpha = 0.05, L = 50, M = 500, bandwidth = 10, # 注意：L被调整为50以避免交叉污染
+run_case_2cp <- function(scenario = "mean", condition = "Anomaly", coords, n = 600, p = 2, 
+                         cp_true = c(200, 400), shift_sizes = c(2.5, -2.5), 
+                         alpha = 0.05, L = 100, M = 500, bandwidth = 10,
                          save_plot = FALSE, plot_prefix = "plot") {
   
-  if (scenario == "cov") shift_sizes <- c(1.6, 2.2)
+  if (scenario == "cov") shift_sizes <- c(1.6, 2.2) # 若为协方差，自动替换为缩放系数
   
   anomaly_only <- (condition == "Anomaly")
-  data_list <- generate_spatial_data_4cp(n, p, nrow(coords), cp_true, shift_sizes, anomaly_only, scenario)
+  data_list <- generate_spatial_data_2cp(n, p, nrow(coords), cp_true, shift_sizes, anomaly_only, scenario)
 
-  # 第1阶段：SNSeg 预检出粗略嫌疑点
+  # 第一阶段：SNSeg 预检出多个点
   sn_res <- detect_cp_stage1(data_list[[1]], scenario)
   est_cps_raw <- sn_res$est_cp
   
   final_detected_cps <- c()
   p_values_list <- c()
   
-  # 第2阶段：【局部爬山寻优】与 DWB 精确检验
+  # 第二阶段：遍历每个找出来的嫌疑点进行 DWB 检验
   if (length(est_cps_raw) > 0) {
     for (ecp in est_cps_raw) {
-      
-      # 1. 在粗略点的前后 20 步长内滑动，寻找观测统计量(S_obs)最大的山峰
-      local_search_grid <- seq(max(L + 5, ecp - 20), min(n - L - 5, ecp + 20), by = 1)
-      best_tau <- ecp
-      max_stat <- -1
-      
-      for (t_cand in local_search_grid) {
-        feat_cand <- build_feature_matrix(data_list, tau = t_cand, L = L, scenario = scenario, coords = coords)
-        if (!is.null(feat_cand)) {
-          # M=10 仅仅为了调用 C++ 计算目前的 S_obs（满足C++最低要求即可，省时间）
-          out_cand <- dwb_test_cpp(feat_cand$Z, feat_cand$actual_L, M = 10, bandwidth = bandwidth)
-          if (out_cand$S_obs > max_stat) {
-            max_stat <- out_cand$S_obs
-            best_tau <- t_cand
-          }
-        }
-      }
-      
-      # 2. 拿着精准定位到的 best_tau，进行正式的 M=500 检验
-      stage2 <- test_anomaly_dwb(data_list, tau = best_tau, L = L, M = M, bandwidth = bandwidth, scenario = scenario, coords = coords)
+      stage2 <- test_anomaly_dwb(data_list, tau = ecp, L = L, M = M, bandwidth = bandwidth, scenario = scenario, coords = coords)
       if (!is.null(stage2)) {
         p_val <- as.numeric(stage2$p_value)
         if (p_val < alpha) {
-          # 去重：防止由于网格搜索导致同一个真实变点被检出两次
-          if (!any(abs(final_detected_cps - best_tau) <= 30)) {
-            final_detected_cps <- c(final_detected_cps, best_tau)
-            p_values_list <- c(p_values_list, p_val)
-          }
+          final_detected_cps <- c(final_detected_cps, ecp)
+          p_values_list <- c(p_values_list, p_val)
         }
       }
     }
   }
   
-  # 准确率统计
-  cp1_found <- FALSE; cp2_found <- FALSE; cp3_found <- FALSE; cp4_found <- FALSE
+  # 多变点正确率判定
+  cp1_found <- FALSE; cp2_found <- FALSE
   if (length(final_detected_cps) > 0) {
     cp1_found <- any(abs(final_detected_cps - cp_true[1]) <= 50)
     cp2_found <- any(abs(final_detected_cps - cp_true[2]) <= 50)
-    cp3_found <- any(abs(final_detected_cps - cp_true[3]) <= 50)
-    cp4_found <- any(abs(final_detected_cps - cp_true[4]) <= 50)
   }
   
   is_correct <- FALSE
   if (condition == "Anomaly") {
-    if (cp1_found && cp2_found && cp3_found && cp4_found) is_correct <- TRUE
+    if (cp1_found && cp2_found) is_correct <- TRUE
   } else {
     if (length(final_detected_cps) == 0) is_correct <- TRUE
   }
   
   # ----------------- 画图模块 -----------------
   if (save_plot) {
-    # 绘制趋势图的扫描网格 (步长设为10加快画图)
     tau_grid <- seq(max(L + 5, 30), min(n - L - 5, n - 30), by = 10)
     scan_df <- scan_anomaly_statistics(data_list, tau_grid, L=L, M=max(200, floor(M/2)), bandwidth=bandwidth, scenario=scenario, coords=coords)
     
-    pdf_filename <- sprintf("%s_%s_%s_4CP.pdf", plot_prefix, scenario, condition)
-    pdf(pdf_filename, width = 12, height = 8)
+    pdf_filename <- sprintf("%s_%s_%s_2CP.pdf", plot_prefix, scenario, condition)
+    pdf(pdf_filename, width = 10, height = 8)
     
     target <- data_list[[1]]; ref <- weighted_neighbors_idw(data_list, coords, 1, 2)
     
+    # 动态将原始对比序列的画布设置为了 2x1（适应 p=2 ）
     par(mfrow=c(p, 1))
     for(j in 1:p) {
       y <- c(target[,j], ref[,j])
@@ -292,7 +278,7 @@ run_case_4cp <- function(scenario = "mean", condition = "Anomaly", coords, n = 1
     
     par(mfrow=c(2,1))
     if (!is.null(scan_df) && nrow(scan_df) > 0) {
-      plot(scan_df$tau, scan_df$S_obs, type="l", col="blue", main="Statistic Trend (4 CPs)", ylab="S_obs", lwd=1.5)
+      plot(scan_df$tau, scan_df$S_obs, type="l", col="blue", main="Statistic Trend (Multi-CP)", ylab="S_obs", lwd=1.5)
       lines(scan_df$tau, scan_df$S_boot_q95, col="red", lty=2)
       abline(v=cp_true, col="gray40", lty=3, lwd=2)
       if(length(final_detected_cps) > 0) abline(v=final_detected_cps, col="#2ca25f", lty=1, lwd=2)
@@ -309,16 +295,15 @@ run_case_4cp <- function(scenario = "mean", condition = "Anomaly", coords, n = 1
   return(list(
     scenario = scenario, condition = condition,
     cp1_found = cp1_found, cp2_found = cp2_found,
-    cp3_found = cp3_found, cp4_found = cp4_found,
     false_positives = sum(!sapply(final_detected_cps, function(x) any(abs(x - cp_true) <= 50))),
     is_correct = is_correct
   ))
 }
 
 # ==========================================
-# 5. 蒙特卡洛主循环器
+# 5. 蒙特卡洛主循环器 (适配多变点)
 # ==========================================
-run_monte_carlo_4cp <- function(N_sim = 50, raw_coords) {
+run_monte_carlo_2cp <- function(N_sim = 50, raw_coords) {
   scenarios <- c("mean", "cov", "multiparam")
   conditions <- c("Anomaly", "Normal")
   
@@ -330,44 +315,41 @@ run_monte_carlo_4cp <- function(N_sim = 50, raw_coords) {
   
   for (scen in scenarios) {
     for (cond in conditions) {
-      cat(sprintf("Running 4-CP Simulation: [%s] | Condition: [%s] ... ", toupper(scen), toupper(cond)))
+      cat(sprintf("Running Multi-CP Simulation: [%s] | Condition: [%s] ... ", toupper(scen), toupper(cond)))
       
       correct_count <- 0
-      cp1_rec <- 0; cp2_rec <- 0; cp3_rec <- 0; cp4_rec <- 0
-      total_fp <- 0
+      cp1_recall <- 0; cp2_recall <- 0
+      total_false_positives <- 0
       
       pb <- txtProgressBar(min = 0, max = N_sim, style = 3)
       for (iter in 1:N_sim) {
-        do_save_plot <- (iter == 1) 
+        do_save_plot <- (iter == 1) # 仅保存第一次的图像
         
-        res <- run_case_4cp(scenario = scen, condition = cond, coords = coords, 
-                            save_plot = do_save_plot, plot_prefix = "MC_4CP")
+        # 调用函数时内部默认会应用 p=2 的逻辑
+        res <- run_case_2cp(scenario = scen, condition = cond, coords = coords, 
+                            save_plot = do_save_plot, plot_prefix = "MC_2CP")
         
         if (res$is_correct) correct_count <- correct_count + 1
-        if (res$cp1_found) cp1_rec <- cp1_rec + 1
-        if (res$cp2_found) cp2_rec <- cp2_rec + 1
-        if (res$cp3_found) cp3_rec <- cp3_rec + 1
-        if (res$cp4_found) cp4_rec <- cp4_rec + 1
-        total_fp <- total_fp + res$false_positives
+        if (res$cp1_found) cp1_recall <- cp1_recall + 1
+        if (res$cp2_found) cp2_recall <- cp2_recall + 1
+        total_false_positives <- total_false_positives + res$false_positives
         
         setTxtProgressBar(pb, iter)
       }
       close(pb)
       
       acc <- correct_count / N_sim
-      r1 <- cp1_rec / N_sim; r2 <- cp2_rec / N_sim
-      r3 <- cp3_rec / N_sim; r4 <- cp4_rec / N_sim
-      fpr <- total_fp / N_sim 
+      r1 <- cp1_recall / N_sim; r2 <- cp2_recall / N_sim
+      fpr <- total_false_positives / N_sim 
       
       results_summary <- rbind(results_summary, data.frame(
         Scenario = scen, Condition = cond, Total_Sim = N_sim,
-        Strict_Accuracy = acc, CP1_Recall = r1, CP2_Recall = r2, 
-        CP3_Recall = r3, CP4_Recall = r4, Avg_False_Positives = fpr
+        Strict_Accuracy = acc, CP1_Recall = r1, CP2_Recall = r2, Avg_False_Positives = fpr
       ))
     }
   }
   
-  cat("\n=================== FINAL REPORT (4 CPs) ===================\n")
+  cat("\n=================== FINAL REPORT (2 CPs) ===================\n")
   print(results_summary)
   cat("============================================================\n")
   
@@ -377,16 +359,18 @@ run_monte_carlo_4cp <- function(N_sim = 50, raw_coords) {
 # ==========================================
 # 6. 执行示例代码
 # ==========================================
+# 随机生成 6 个站点的乱序经纬度坐标
 raw_station_coords <- matrix(c(
-  120.0, 30.0, 
-  120.1, 30.2, 
-  119.8, 29.9, 
-  120.2, 29.8, 
-  119.9, 30.3, 
-  120.5, 30.0  
+  120.0, 30.0, # 站点 A
+  120.1, 30.2, # 站点 B
+  119.8, 29.9, # 站点 C
+  120.2, 29.8, # 站点 D
+  119.9, 30.3, # 站点 E
+  120.5, 30.0  # 站点 F
 ), ncol = 2, byrow = TRUE)
 
 set.seed(2024)
 
-# 执行验证 (测试运行 5 次，可自行调大 N_sim)
-mc_results <- run_monte_carlo_4cp(N_sim = 5, raw_coords = raw_station_coords)
+# 执行蒙特卡洛模拟 (为了节约演示时间设为 N=5，实测可调整为 N=50 或 100)
+# 此函数会自动寻找 raw_station_coords 中最中心的一个作为目标站！
+mc_results <- run_monte_carlo_2cp(N_sim = 1, raw_coords = raw_station_coords)
