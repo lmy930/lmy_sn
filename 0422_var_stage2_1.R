@@ -4,6 +4,9 @@ library(mvtnorm)
 library(Rcpp)
 library(RcppArmadillo)
 
+# ==========================================
+# 1. C++ 模块 (无需修改：通过对数映射后，继续使用均值跳跃检验)
+# ==========================================
 cpp_code <- "
 #include <RcppArmadillo.h>
 // [[Rcpp::depends(RcppArmadillo)]]
@@ -74,7 +77,7 @@ List sbb_test_cpp(mat Z, int L, int M = 500, double expected_block_size = 15.0) 
 Rcpp::sourceCpp(code = cpp_code)
 
 # ==========================================
-# 1. 基础工具模块
+# 2. 基础工具模块
 # ==========================================
 haversine_dist <- function(lon1, lat1, lon2, lat2) {
   rad <- pi / 180; R <- 6371.0
@@ -106,68 +109,119 @@ weighted_neighbors_idw <- function(data_list, coords, target_idx = 1, power = 2)
   return(ref_mat)
 }
 
-# 修改点：将单变点生成改为双变点生成，偏移量作用于 [cp1, cp2-1] 区间
-generate_spatial_data_ar1_2cp <- function(n=1000, p=2, K, cp_locs=c(333, 666), shift_size=2.5, condition="Anomaly_Both") {
+# ==========================================
+# 3. 数据生成模块（修改点：方差突变，保持均值和相关性）
+# ==========================================
+generate_spatial_data_ar1_1cp_var <- function(n=1000, p=2, K, cp_loc=500, var_scale=2.5, condition="Anomaly_Both") {
+  # 基础噪声协方差矩阵和AR1转移矩阵
   Sigma_eps <- outer(1:p, 1:p, function(i, j) 0.45 ^ abs(i - j))
   A <- if (p == 2) matrix(c(0.50, 0.08, 0.05, 0.45), p, p, byrow = TRUE) else diag(0.5, p)
   
   data_list <- vector("list", K)
   for (i in seq_len(K)) {
     X <- matrix(0, nrow = n, ncol = p)
-    for (t in 2:n) X[t, ] <- as.numeric(A %*% X[t - 1, ]) + as.numeric(rmvnorm(1, mean = rep(0, p), sigma = Sigma_eps))
+    for (t in 2:n) {
+      # 每一步生成独立的白噪声
+      noise <- as.numeric(rmvnorm(1, mean = rep(0, p), sigma = Sigma_eps))
+      scale_vec <- c(1, 1) # 默认不放缩
+      
+      if (t >= cp_loc) {
+        # Var1 的方差放缩逻辑
+        if ((condition == "Anomaly_Both" && i == 1) ||
+            (condition == "Normal") ||
+            (condition == "Anomaly_Var1" && i == 1) ||
+            (condition == "Anomaly_Var2")) {
+          scale_vec[1] <- var_scale
+        }
+        
+        # Var2 的方差放缩逻辑
+        if ((condition == "Anomaly_Both" && i == 1) ||
+            (condition == "Normal") ||
+            (condition == "Anomaly_Var1") ||
+            (condition == "Anomaly_Var2" && i == 1)) {
+          scale_vec[2] <- var_scale
+        }
+      }
+      # 将放缩比例乘在当前步的噪声上，累加进自回归过程
+      X[t, ] <- as.numeric(A %*% X[t - 1, ]) + noise * scale_vec
+    }
     data_list[[i]] <- X
-  }
-  
-  # 分别对每个变量注入偏移：形成一个 0 -> shift -> 0 的区间异常
-  for (i in seq_len(K)) {
-    # 变量 1
-    if ((condition == "Anomaly_Both" && i == 1) ||
-        (condition == "Normal") ||
-        (condition == "Anomaly_Var1" && i == 1) ||
-        (condition == "Anomaly_Var2")) {
-      data_list[[i]][cp_locs[1]:(cp_locs[2]-1), 1] <- data_list[[i]][cp_locs[1]:(cp_locs[2]-1), 1] + shift_size
-    }
-    
-    # 变量 2
-    if ((condition == "Anomaly_Both" && i == 1) ||
-        (condition == "Normal") ||
-        (condition == "Anomaly_Var1") ||
-        (condition == "Anomaly_Var2" && i == 1)) {
-      data_list[[i]][cp_locs[1]:(cp_locs[2]-1), 2] <- data_list[[i]][cp_locs[1]:(cp_locs[2]-1), 2] + shift_size
-    }
   }
   return(data_list)
 }
 
-build_feature_matrix_mean <- function(data_list, tau, L, coords) {
-  n <- nrow(data_list[[1]]); p <- ncol(data_list[[1]])
+# ==========================================
+# 4. 检测算法与特征工程模块（修改点：对数方差映射）
+# ==========================================
+#对数方差映射
+# build_feature_matrix_var <- function(data_list, tau, L, coords) {
+#   n <- nrow(data_list[[1]]); p <- ncol(data_list[[1]])
+#   s_idx <- max(1, tau - L + 1); e_idx <- min(n, tau + L)
+#   actual_L <- tau - s_idx + 1
+#   if (actual_L < 20 || (e_idx - s_idx + 1) != 2 * actual_L) return(NULL)
+  
+#   win_list <- lapply(data_list, function(mat) mat[s_idx:e_idx, , drop = FALSE])
+#   target_mat <- win_list[[1]]
+#   ref_mat <- weighted_neighbors_idw(win_list, coords, 1, 2)
+  
+#   # a. 局部强制中心化（只测波动，剥离局部小漂移）
+#   target_centered <- scale(target_mat, center = TRUE, scale = FALSE)
+#   ref_centered <- scale(ref_mat, center = TRUE, scale = FALSE)
+  
+#   # b. 对数平方映射（将方差突变转换为均值突变）
+#   epsilon <- 1e-6
+#   Y_target <- log(target_centered^2 + epsilon)
+#   Y_ref <- log(ref_centered^2 + epsilon)
+  
+#   # c. 空间差值：在对数域相减，完美抵消气候背景同等倍数的方差扩大
+#   Z_mapped <- Y_target - Y_ref
+  
+#   return(list(Z = Z_mapped, actual_L = actual_L))
+# }
+
+# 绝对值方差映射
+build_feature_matrix_var <- function(data_list, tau, L, coords) {
+  n <- nrow(data_list[[1]])
   s_idx <- max(1, tau - L + 1); e_idx <- min(n, tau + L)
   actual_L <- tau - s_idx + 1
   if (actual_L < 20 || (e_idx - s_idx + 1) != 2 * actual_L) return(NULL)
   
   win_list <- lapply(data_list, function(mat) mat[s_idx:e_idx, , drop = FALSE])
+  target_mat <- win_list[[1]]
   ref_mat <- weighted_neighbors_idw(win_list, coords, 1, 2)
-  return(list(Z = win_list[[1]] - ref_mat, actual_L = actual_L))
+  
+  # 1. 局部去均值 (只留波动)
+  target_centered <- scale(target_mat, center = TRUE, scale = FALSE)
+  ref_centered <- scale(ref_mat, center = TRUE, scale = FALSE)
+  
+  # 2. 核心修改：使用绝对值映射 (稳健、无极值)
+  Y_target <- abs(target_centered)
+  Y_ref <- abs(ref_centered)
+  
+  # 3. 空间差分
+  Z <- Y_target - Y_ref
+  
+  return(list(Z = Z, actual_L = actual_L))
 }
 
-test_anomaly_sbb <- function(data_list, tau, L, M, block_size, coords) {
-  feat <- build_feature_matrix_mean(data_list, tau, L, coords)
+
+test_anomaly_sbb_var <- function(data_list, tau, L, M, block_size, coords) {
+  feat <- build_feature_matrix_var(data_list, tau, L, coords)
   if (is.null(feat)) return(NULL)
   out <- sbb_test_cpp(feat$Z, feat$actual_L, M, block_size)
   return(c(out, list(tau = tau)))
 }
 
-scan_anomaly_statistics <- function(data_list, tau_grid, L, M, block_size, coords) {
+scan_anomaly_statistics_var <- function(data_list, tau_grid, L, M, block_size, coords) {
   rows <- lapply(tau_grid, function(tau) {
-    res <- test_anomaly_sbb(data_list, tau, L, M, block_size, coords)
+    res <- test_anomaly_sbb_var(data_list, tau, L, M, block_size, coords)
     if (!is.null(res)) data.frame(tau=tau, S_obs=res$S_obs, S_boot_q95=res$S_boot_q95, p_value=res$p_value) else NULL
   })
   do.call(rbind, rows)
 }
 
-# 修改点：兼容多个真实变点的评估
 evaluate_metrics <- function(n, cp_true, detected_cps, tol = 50, condition) {
-  is_anomaly_cond <- condition != "Normal"
+  is_anomaly_cond <- condition != "Normal" 
   
   get_labels <- function(n, cps) {
     lbls <- rep(1, n)
@@ -184,17 +238,17 @@ evaluate_metrics <- function(n, cp_true, detected_cps, tol = 50, condition) {
   if (is_anomaly_cond) {
     dist_mat <- abs(outer(detected_cps, cp_true, "-"))
     if (length(detected_cps) > 0) {
-      min_dists <- apply(dist_mat, 2, min) # 每个真实变点到最近检测变点的距离
+      min_dists <- apply(dist_mat, 2, min)
       TP <- sum(min_dists <= tol)
-      FP <- max(0, length(detected_cps) - TP)
-      MAE <- mean(min_dists) # 采用均值以更合理评估多个变点的整体误差
+      FP <- length(detected_cps) - TP
+      MAE <- min(min_dists)
       H_dist <- max(max(min_dists), max(apply(dist_mat, 1, min)))
     } else {
       TP <- 0; FP <- 0; MAE <- NA; H_dist <- n
     }
     
     Precision <- ifelse(TP + FP == 0, 0, TP / (TP + FP))
-    Recall <- TP / length(cp_true) # 分母改为真实变点的数量
+    Recall <- TP / 1
     F1 <- ifelse(Precision + Recall == 0, 0, 2 * Precision * Recall / (Precision + Recall))
     
     return(list(TP=TP, FP=FP, MAE=MAE, Hausdorff=H_dist, ARI=ARI, F1=F1, Precision=Precision, Recall=Recall))
@@ -204,14 +258,16 @@ evaluate_metrics <- function(n, cp_true, detected_cps, tol = 50, condition) {
   }
 }
 
-run_case_logic <- function(condition, coords, n=1000, p=2, cp_true=c(333, 666), L=50, M=1000, block_size=15) {
-  # 修改点：调用两变点数据生成器
-  data_list <- generate_spatial_data_ar1_2cp(n, p, nrow(coords), cp_true, 2.5, condition)
-  sn_res <- SNSeg_Multi(data_list[[1]], paras_to_test = "mean", confidence = 0.95, grid_size_scale = 0.05, plot_SN = FALSE)
+run_case_logic_var <- function(condition, coords, n=1000, p=2, cp_true=500, L=50, M=1000, block_size=15) {
+  data_list <- generate_spatial_data_ar1_1cp_var(n, p, nrow(coords), cp_true, 2.5, condition)
+  
+  # 修改点：Stage 1 的粗筛必须使用 "covariance" 才能捕获方差/协方差的突变
+  sn_res <- SNSeg_Multi(data_list[[1]], paras_to_test = "covariance", confidence = 0.95, grid_size_scale = 0.05, plot_SN = FALSE)
   
   final_detected_cps <- c()
   for (ecp in sn_res$est_cp) {
-    stage2 <- test_anomaly_sbb(data_list, tau = ecp, L = L, M = M, block_size = block_size, coords = coords)
+    # Stage 2 调用更新后的对数映射检验函数
+    stage2 <- test_anomaly_sbb_var(data_list, tau = ecp, L = L, M = M, block_size = block_size, coords = coords)
     if (!is.null(stage2) && stage2$p_value < 0.05) {
       if (!any(abs(final_detected_cps - ecp) <= 30)) final_detected_cps <- c(final_detected_cps, ecp)
     }
@@ -229,20 +285,25 @@ run_case_logic <- function(condition, coords, n=1000, p=2, cp_true=c(333, 666), 
 }
 
 
-# generate_best_plots <- function(best_run, condition, cp_true, L, M, block_size, coords, prefix, n, p) {
+# ==========================================
+# 5. 可视化与模拟模块 (完整保留)
+# ==========================================
+# generate_best_plots_var <- function(best_run, condition, cp_true, L, M, block_size, coords, prefix, n, p) {
 #   data_list <- best_run$data_list
 #   detected_cps <- best_run$cps
   
+#   # 生成扫描统计量绘图数据，调用方差版扫描函数
 #   tau_grid <- seq(max(L + 5, 30), min(n - L - 5, n - 30), by = 10)
-#   scan_df <- scan_anomaly_statistics(data_list, tau_grid, L, max(200, floor(M/2)), block_size, coords)
+#   scan_df <- scan_anomaly_statistics_var(data_list, tau_grid, L, max(200, floor(M/2)), block_size, coords)
   
 #   target <- data_list[[1]]; ref <- weighted_neighbors_idw(data_list, coords, 1, 2)
   
-#   png(filename = sprintf("%s_%s_TimeSeries.png", prefix, condition), width = 1200, height = 1000, res = 120)
+#   png(filename = sprintf("%s_%s_Variance_TimeSeries.png", prefix, condition), width = 1200, height = 1000, res = 120)
 #   par(mfrow=c(p + 1, 1), mar=c(4, 4, 2, 1)) 
   
 #   for(j in 1:p) {
-#     plot(1:n, target[,j], type="l", col="#d7301f", main=sprintf("Var %d Time Series (%s)", j, condition), ylab="Value", ylim=range(c(target[,j], ref[,j])))
+#     # 绘制原始时间序列，方差突变表现为包络线（波动）变宽
+#     plot(1:n, target[,j], type="l", col="#d7301f", main=sprintf("Var %d Time Series (Variance | %s)", j, condition), ylab="Value", ylim=range(c(target[,j], ref[,j])))
 #     lines(1:n, ref[,j], col="#2171b5", lty=2)
     
 #     if(condition != "Normal") abline(v=cp_true, col="gray40", lty=3, lwd=2)
@@ -253,7 +314,6 @@ run_case_logic <- function(condition, coords, n=1000, p=2, cp_true=c(333, 666), 
 #     else if (condition == "Anomaly_Var2" && j == 2) is_anomaly_var <- TRUE
     
 #     cp_col <- if(is_anomaly_var) "red" else "green"
-    
 #     if(length(detected_cps) > 0) abline(v=detected_cps, col=cp_col, lty=1, lwd=2)
 #   }
   
@@ -263,7 +323,7 @@ run_case_logic <- function(condition, coords, n=1000, p=2, cp_true=c(333, 666), 
 #   lines(1:n, ref[,2], col="#377eb8", lty=2, lwd=1.5)
   
 #   if(condition != "Normal") abline(v=cp_true, col="gray40", lty=3, lwd=2)
-#   if(length(detected_cps) > 0) abline(v=detected_cps, col="black", lty=1, lwd=2) 
+#   if(length(detected_cps) > 0) abline(v=detected_cps, col="black", lty=1, lwd=2)
   
 #   legend("topleft", legend=c("Var1 Target", "Var1 Ref", "Var2 Target", "Var2 Ref"),
 #          col=c("#e41a1c", "#e41a1c", "#377eb8", "#377eb8"),
@@ -272,10 +332,10 @@ run_case_logic <- function(condition, coords, n=1000, p=2, cp_true=c(333, 666), 
 #   dev.off()
   
   
-#   png(filename = sprintf("%s_%s_Statistics.png", prefix, condition), width = 1200, height = 800, res = 120)
+#   png(filename = sprintf("%s_%s_Variance_Statistics.png", prefix, condition), width = 1200, height = 800, res = 120)
 #   par(mfrow=c(2, 1), mar=c(4, 4, 2, 1))
 #   if(!is.null(scan_df)) {
-#     plot(scan_df$tau, scan_df$S_obs, type="l", col="blue", main="SBB Statistic Trend", ylab="S_obs", lwd=1.5)
+#     plot(scan_df$tau, scan_df$S_obs, type="l", col="blue", main="Log-Variance SBB Statistic Trend", ylab="S_obs", lwd=1.5)
 #     lines(scan_df$tau, scan_df$S_boot_q95, col="red", lty=2)
 #     if(condition != "Normal") abline(v=cp_true, col="gray40", lty=3, lwd=2)
 #     if(length(detected_cps) > 0) abline(v=detected_cps, col="#2ca25f", lty=1, lwd=2)
@@ -287,12 +347,12 @@ run_case_logic <- function(condition, coords, n=1000, p=2, cp_true=c(333, 666), 
 #   }
 #   dev.off()
 #   cat(sprintf("\n=> 最佳运行图表已分离保存: [%s] 和 [%s]\n", 
-#               sprintf("%s_%s_TimeSeries.png", prefix, condition), 
-#               sprintf("%s_%s_Statistics.png", prefix, condition)))
+#               sprintf("%s_%s_Variance_TimeSeries.png", prefix, condition), 
+#               sprintf("%s_%s_Variance_Statistics.png", prefix, condition)))
 # }
 
-generate_best_plots <- function(best_run, condition, cp_true, L, M, block_size, coords, prefix, n, p) {
-  # 确保加载了必要的包
+
+generate_best_plots_var <- function(best_run, condition, cp_true, L, M, block_size, coords, prefix, n, p) {
   require(ggplot2)
   require(tidyr)
   require(dplyr)
@@ -305,7 +365,7 @@ generate_best_plots <- function(best_run, condition, cp_true, L, M, block_size, 
   ref <- weighted_neighbors_idw(data_list, coords, 1, 2)
   
   # ==========================================
-  # 1. 时序数据对齐与长格式转换
+  # 1. 数据转换
   # ==========================================
   df_time <- data.frame(
     Time = 1:n,
@@ -320,14 +380,14 @@ generate_best_plots <- function(best_run, condition, cp_true, L, M, block_size, 
     mutate(Group = paste(Variable, Type, sep = " - "))
   
   # ==========================================
-  # 2. 颜色与线型强对比映射字典
+  # 2. 颜色与线型强对比映射
   # ==========================================
+  # 彻底区分目标站和临近站的颜色
   custom_colors <- c(
     "Var1 - Target" = "#e31a1c", # 鲜红色 (Var1 目标)
     "Var1 - Ref"    = "#06ef58", # 亮橙色 (Var1 临近)
     "Var2 - Target" = "#1aa0c1", # 深蓝色 (Var2 目标)
     "Var2 - Ref"    = "#420df0"  # 浅绿色 (Var2 临近)
-  )
   )
   custom_linetypes <- c(
     "Var1 - Target" = "solid", "Var1 - Ref" = "dashed",
@@ -339,7 +399,7 @@ generate_best_plots <- function(best_run, condition, cp_true, L, M, block_size, 
   )
   
   # ==========================================
-  # 3. 封装时序图绘图函数
+  # 3. 封装时序图绘图函数 (新增 cp_color 参数控制竖线颜色)
   # ==========================================
   plot_ts <- function(data, title, cp_color) {
     p_base <- ggplot(data, aes(x = Time, y = Value, color = Group, linetype = Group)) +
@@ -349,7 +409,7 @@ generate_best_plots <- function(best_run, condition, cp_true, L, M, block_size, 
       scale_linewidth_manual(values = custom_linewidths) +
       # 真实突变点 (灰色虚线)
       {if(condition != "Normal") geom_vline(xintercept = cp_true, color = "gray40", linetype = "dotted", linewidth = 1.2)} +
-      # 检测到的突变点 (动态颜色：红/绿)
+      # 检测到的突变点 (根据传入的颜色：红/绿)
       {if(length(detected_cps) > 0) geom_vline(xintercept = detected_cps, color = cp_color, linetype = "solid", linewidth = 1.2)} +
       labs(title = title, x = NULL, y = "Value") +
       theme_minimal(base_size = 14) +
@@ -357,7 +417,7 @@ generate_best_plots <- function(best_run, condition, cp_true, L, M, block_size, 
         plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
         legend.position = "right",
         legend.title = element_blank(),
-        legend.key.width = unit(2.5, "cm"), 
+        legend.key.width = unit(2.5, "cm"), # 拉长图例，方便看清虚线
         panel.grid.minor = element_blank(),
         panel.grid.major = element_line(color = "gray90")
       )
@@ -365,37 +425,39 @@ generate_best_plots <- function(best_run, condition, cp_true, L, M, block_size, 
   }
   
   # ==========================================
-  # 4. 判定竖线颜色与生成时序图表
+  # 4. 判定竖线颜色与生成图表
   # ==========================================
+  # Var 1 的突变判定：如果场景是 Both 或 Var1 异常，则标红，否则标绿
   is_anomaly_var1 <- condition %in% c("Anomaly_Both", "Anomaly_Var1")
   cp_col1 <- ifelse(is_anomaly_var1, "red", "green")
   
+  # Var 2 的突变判定
   is_anomaly_var2 <- condition %in% c("Anomaly_Both", "Anomaly_Var2")
   cp_col2 <- ifelse(is_anomaly_var2, "red", "green")
   
-  # 组合图：只要是异常场景就标红，Normal场景下如果是误报则标绿
+  # 组合图和统计图突变判定：只要不是全正常(Normal)，统一用红色标示异常
   cp_col_combined <- ifelse(condition != "Normal", "red", "green")
   
-  # 绘制三张子图
-  p1 <- plot_ts(df_long %>% filter(Variable == "Var1"), sprintf("Var 1 Time Series (%s)", condition), cp_col1)
-  p2 <- plot_ts(df_long %>% filter(Variable == "Var2"), sprintf("Var 2 Time Series (%s)", condition), cp_col2)
+  # 生成三张子图
+  p1 <- plot_ts(df_long %>% filter(Variable == "Var1"), sprintf("Var 1 Time Series (Variance | %s)", condition), cp_col1)
+  p2 <- plot_ts(df_long %>% filter(Variable == "Var2"), sprintf("Var 2 Time Series (Variance | %s)", condition), cp_col2)
   p3 <- plot_ts(df_long, sprintf("Combined View: Both Variables (%s)", condition), cp_col_combined) +
         labs(x = "Time") +
         theme(legend.position = "bottom")
   
-  # 使用 patchwork 拼图并保存
+  # 使用 patchwork 拼图
   combined_plot <- p1 / p2 / p3
-  ts_filename <- sprintf("%s_%s_TimeSeries.png", prefix, condition)
+  
+  ts_filename <- sprintf("%s_%s_Variance_TimeSeries.png", prefix, condition)
   ggsave(ts_filename, plot = combined_plot, width = 12, height = 10, dpi = 150, bg = "white")
   
   # ==========================================
-  # 5. 扫描统计量图表生成
+  # 5. 生成统计量图 (同样适配红色/绿色竖线)
   # ==========================================
-  # 调用基础版的 scan_anomaly_statistics
   tau_grid <- seq(max(L + 5, 30), min(n - L - 5, n - 30), by = 10)
-  scan_df <- scan_anomaly_statistics(data_list, tau_grid, L, max(200, floor(M/2)), block_size, coords)
+  scan_df <- scan_anomaly_statistics_var(data_list, tau_grid, L, max(200, floor(M/2)), block_size, coords)
   
-  stat_filename <- sprintf("%s_%s_Statistics.png", prefix, condition)
+  stat_filename <- sprintf("%s_%s_Variance_Statistics.png", prefix, condition)
   
   if(!is.null(scan_df)) {
     p_stat <- ggplot(scan_df, aes(x = tau)) +
@@ -404,7 +466,7 @@ generate_best_plots <- function(best_run, condition, cp_true, L, M, block_size, 
       scale_color_manual(values = c("S_obs" = "#3182bd", "95% Threshold" = "#de2d26")) +
       {if(condition != "Normal") geom_vline(xintercept = cp_true, color = "gray40", linetype = "dotted", linewidth = 1.2)} +
       {if(length(detected_cps) > 0) geom_vline(xintercept = detected_cps, color = cp_col_combined, linetype = "solid", linewidth = 1.2)} +
-      labs(title = "SBB Statistic Trend", x = NULL, y = "S_obs") +
+      labs(title = "Log-Variance SBB Statistic Trend", x = NULL, y = "S_obs") +
       theme_minimal(base_size = 14) +
       theme(plot.title = element_text(face = "bold", hjust = 0.5), legend.title = element_blank(), legend.position = "right")
     
@@ -418,26 +480,20 @@ generate_best_plots <- function(best_run, condition, cp_true, L, M, block_size, 
       theme_minimal(base_size = 14) +
       theme(plot.title = element_text(face = "bold", hjust = 0.5))
     
-    # 拼图并保存
     stat_plot <- p_stat / p_pval
     ggsave(stat_filename, plot = stat_plot, width = 12, height = 8, dpi = 150, bg = "white")
   }
   
-  cat(sprintf("\n=> 最佳运行图表已分离保存:\n   [%s]\n   [%s]\n", ts_filename, stat_filename))
+  cat(sprintf("\n=> 最佳运行图表已生成:\n   [%s]\n   [%s]\n", ts_filename, stat_filename))
 }
 
-
-# 修改点：将主函数命名为 2cp，并传入两个真实变点
-run_monte_carlo_2cp <- function(N_sim = 50, raw_coords) {
+run_monte_carlo_1cp_var <- function(N_sim = 50, raw_coords) {
   conditions <- c("Anomaly_Both", "Anomaly_Var1", "Anomaly_Var2", "Normal")
   coords <- find_and_reorder_stations(raw_coords)
   summary_df <- data.frame()
   
-  # 定义双变点位置
-  true_cps <- c(333, 666)
-  
   for (cond in conditions) {
-    cat(sprintf("\n=== 正在运行: AR(1) Mean | 2CP 场景: %s ===\n", toupper(cond)))
+    cat(sprintf("\n=== 正在运行: AR(1) VARIANCE | 场景: %s ===\n", toupper(cond)))
     
     best_score <- -Inf
     best_run <- NULL
@@ -447,7 +503,7 @@ run_monte_carlo_2cp <- function(N_sim = 50, raw_coords) {
     
     pb <- txtProgressBar(min = 0, max = N_sim, style = 3)
     for (iter in 1:N_sim) {
-      res <- run_case_logic(cond, coords, n=1000, p=2, cp_true=true_cps, L=50, M=1000, block_size=15)
+      res <- run_case_logic_var(cond, coords, n=1000, p=2, cp_true=500, L=50, M=1000, block_size=15)
       
       is_anomaly_cond <- cond != "Normal"
       
@@ -470,7 +526,7 @@ run_monte_carlo_2cp <- function(N_sim = 50, raw_coords) {
     }
     close(pb)
     
-    generate_best_plots(best_run, cond, cp_true=true_cps, L=50, M=1000, block_size=15, coords=coords, prefix="BestRun_AR1_2CP", n=1000, p=2)
+    generate_best_plots_var(best_run, cond, cp_true=500, L=50, M=1000, block_size=15, coords=coords, prefix="BestRun_AR1", n=1000, p=2)
     
     summary_df <- rbind(summary_df, data.frame(
       Condition = cond,
@@ -487,10 +543,12 @@ run_monte_carlo_2cp <- function(N_sim = 50, raw_coords) {
   return(summary_df)
 }
 
+# 运行入口
 raw_station_coords <- matrix(c(
   116.41,39.92, 116.397,39.982, 116.339,39.929,
   116.461,39.937, 116.407,39.866, 116.352,39.878 
 ), ncol = 2, byrow = TRUE)
 
+# N_sim设置为2用于快速测试，正式跑建议设置为50-100
 set.seed(2026)
-mc_results <- run_monte_carlo_2cp(N_sim = 5, raw_coords = raw_station_coords)
+mc_results_var <- run_monte_carlo_1cp_var(N_sim = 5, raw_coords = raw_station_coords)

@@ -228,72 +228,206 @@ run_case_logic <- function(condition, coords, n=1000, p=2, cp_true=500, L=50, M=
 }
 
 
+# generate_best_plots <- function(best_run, condition, cp_true, L, M, block_size, coords, prefix, n, p) {
+#   data_list <- best_run$data_list
+#   detected_cps <- best_run$cps
+  
+#   tau_grid <- seq(max(L + 5, 30), min(n - L - 5, n - 30), by = 10)
+#   scan_df <- scan_anomaly_statistics(data_list, tau_grid, L, max(200, floor(M/2)), block_size, coords)
+  
+#   target <- data_list[[1]]; ref <- weighted_neighbors_idw(data_list, coords, 1, 2)
+  
+#   # 修改点：扩展高度，并添加第三张合并图
+#   png(filename = sprintf("%s_%s_TimeSeries.png", prefix, condition), width = 1200, height = 1000, res = 120)
+#   par(mfrow=c(p + 1, 1), mar=c(4, 4, 2, 1)) # 修改点：增加一行用于联合图
+  
+#   # 图1：逐一绘制时间序列 (包括正常/异常的竖线颜色控制)
+#   for(j in 1:p) {
+#     plot(1:n, target[,j], type="l", col="#d7301f", main=sprintf("Var %d Time Series (%s)", j, condition), ylab="Value", ylim=range(c(target[,j], ref[,j])))
+#     lines(1:n, ref[,j], col="#2171b5", lty=2)
+    
+#     if(condition != "Normal") abline(v=cp_true, col="gray40", lty=3, lwd=2)
+    
+#     # 动态判断当前变量(j)是否被注入了异常(目标站与临近站不一致)
+#     is_anomaly_var <- FALSE
+#     if (condition == "Anomaly_Both") is_anomaly_var <- TRUE
+#     else if (condition == "Anomaly_Var1" && j == 1) is_anomaly_var <- TRUE
+#     else if (condition == "Anomaly_Var2" && j == 2) is_anomaly_var <- TRUE
+    
+#     # 核心修改：异常变化变点用红色竖线，正常变化用绿色竖线
+#     cp_col <- if(is_anomaly_var) "red" else "green"
+    
+#     if(length(detected_cps) > 0) abline(v=detected_cps, col=cp_col, lty=1, lwd=2)
+#   }
+  
+#   # 图2：新增联合绘图区块
+#   plot(1:n, target[,1], type="l", col="#e41a1c", main=sprintf("Combined View: Both Variables (%s)", condition), ylab="Value", ylim=range(c(target, ref)))
+#   lines(1:n, ref[,1], col="#e41a1c", lty=2, lwd=1.5)
+#   lines(1:n, target[,2], col="#377eb8", lty=1)
+#   lines(1:n, ref[,2], col="#377eb8", lty=2, lwd=1.5)
+  
+#   if(condition != "Normal") abline(v=cp_true, col="gray40", lty=3, lwd=2)
+#   if(length(detected_cps) > 0) abline(v=detected_cps, col="black", lty=1, lwd=2) # 联合图用黑色凸显变点
+  
+#   legend("topleft", legend=c("Var1 Target", "Var1 Ref", "Var2 Target", "Var2 Ref"),
+#          col=c("#e41a1c", "#e41a1c", "#377eb8", "#377eb8"),
+#          lty=c(1, 2, 1, 2), cex=0.8, horiz=TRUE, bty="n", lwd=c(1,1.5,1,1.5))
+  
+#   dev.off()
+  
+  
+#   png(filename = sprintf("%s_%s_Statistics.png", prefix, condition), width = 1200, height = 800, res = 120)
+#   par(mfrow=c(2, 1), mar=c(4, 4, 2, 1))
+#   if(!is.null(scan_df)) {
+#     plot(scan_df$tau, scan_df$S_obs, type="l", col="blue", main="SBB Statistic Trend", ylab="S_obs", lwd=1.5)
+#     lines(scan_df$tau, scan_df$S_boot_q95, col="red", lty=2)
+#     if(condition != "Normal") abline(v=cp_true, col="gray40", lty=3, lwd=2)
+#     if(length(detected_cps) > 0) abline(v=detected_cps, col="#2ca25f", lty=1, lwd=2)
+    
+#     plot(scan_df$tau, scan_df$p_value, type="l", col="purple", main="P-value Trend", ylab="P-value", ylim=c(0,1), lwd=1.5)
+#     abline(h=0.05, col="orange", lty=2, lwd=2)
+#     if(condition != "Normal") abline(v=cp_true, col="gray40", lty=3, lwd=2)
+#     if(length(detected_cps) > 0) abline(v=detected_cps, col="#2ca25f", lty=1, lwd=2)
+#   }
+#   dev.off()
+#   cat(sprintf("\n=> 最佳运行图表已分离保存: [%s] 和 [%s]\n", 
+#               sprintf("%s_%s_TimeSeries.png", prefix, condition), 
+#               sprintf("%s_%s_Statistics.png", prefix, condition)))
+# }
+
 generate_best_plots <- function(best_run, condition, cp_true, L, M, block_size, coords, prefix, n, p) {
+  # 确保加载了必要的包
+  require(ggplot2)
+  require(tidyr)
+  require(dplyr)
+  require(patchwork) 
+  
   data_list <- best_run$data_list
   detected_cps <- best_run$cps
   
+  target <- data_list[[1]]
+  ref <- weighted_neighbors_idw(data_list, coords, 1, 2)
+  
+  # ==========================================
+  # 1. 时序数据对齐与长格式转换
+  # ==========================================
+  df_time <- data.frame(
+    Time = 1:n,
+    Var1_Target = target[, 1],
+    Var1_Ref    = ref[, 1],
+    Var2_Target = target[, 2],
+    Var2_Ref    = ref[, 2]
+  )
+  
+  df_long <- df_time %>%
+    pivot_longer(cols = -Time, names_to = c("Variable", "Type"), names_sep = "_", values_to = "Value") %>%
+    mutate(Group = paste(Variable, Type, sep = " - "))
+  
+  # ==========================================
+  # 2. 颜色与线型强对比映射
+  # ==========================================
+  custom_colors <- c(
+    "Var1 - Target" = "#e31a1c", # 鲜红色 (Var1 目标)
+    "Var1 - Ref"    = "#06ef58", # 亮橙色 (Var1 临近)
+    "Var2 - Target" = "#1aa0c1", # 深蓝色 (Var2 目标)
+    "Var2 - Ref"    = "#420df0"  # 浅绿色 (Var2 临近)
+  )
+  custom_linetypes <- c(
+    "Var1 - Target" = "solid", "Var1 - Ref" = "dashed",
+    "Var2 - Target" = "solid", "Var2 - Ref" = "dashed"
+  )
+  custom_linewidths <- c(
+    "Var1 - Target" = 1.0, "Var1 - Ref" = 0.7,
+    "Var2 - Target" = 1.0, "Var2 - Ref" = 0.7
+  )
+  
+  # ==========================================
+  # 3. 封装时序图绘图函数
+  # ==========================================
+  plot_ts <- function(data, title, cp_color) {
+    p_base <- ggplot(data, aes(x = Time, y = Value, color = Group, linetype = Group)) +
+      geom_line(aes(linewidth = Group), alpha = 0.85) +
+      scale_color_manual(values = custom_colors) +
+      scale_linetype_manual(values = custom_linetypes) +
+      scale_linewidth_manual(values = custom_linewidths) +
+      # 真实突变点 (灰色虚线)
+      {if(condition != "Normal") geom_vline(xintercept = cp_true, color = "gray40", linetype = "dotted", linewidth = 1.2)} +
+      # 检测到的突变点 (动态颜色：红/绿)
+      {if(length(detected_cps) > 0) geom_vline(xintercept = detected_cps, color = cp_color, linetype = "solid", linewidth = 1.2)} +
+      labs(title = title, x = NULL, y = "Value") +
+      theme_minimal(base_size = 14) +
+      theme(
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
+        legend.position = "right",
+        legend.title = element_blank(),
+        legend.key.width = unit(2.5, "cm"), 
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_line(color = "gray90")
+      )
+    return(p_base)
+  }
+  
+  # ==========================================
+  # 4. 判定竖线颜色与生成时序图表
+  # ==========================================
+  is_anomaly_var1 <- condition %in% c("Anomaly_Both", "Anomaly_Var1")
+  cp_col1 <- ifelse(is_anomaly_var1, "red", "green")
+  
+  is_anomaly_var2 <- condition %in% c("Anomaly_Both", "Anomaly_Var2")
+  cp_col2 <- ifelse(is_anomaly_var2, "red", "green")
+  
+  cp_col_combined <- ifelse(condition != "Normal", "red", "green")
+  
+  # 绘制三张子图 (注意这里去掉了 Variance 字眼，适配你的基础版本)
+  p1 <- plot_ts(df_long %>% filter(Variable == "Var1"), sprintf("Var 1 Time Series (%s)", condition), cp_col1)
+  p2 <- plot_ts(df_long %>% filter(Variable == "Var2"), sprintf("Var 2 Time Series (%s)", condition), cp_col2)
+  p3 <- plot_ts(df_long, sprintf("Combined View: Both Variables (%s)", condition), cp_col_combined) +
+        labs(x = "Time") +
+        theme(legend.position = "bottom")
+  
+  # 使用 patchwork 拼图并保存
+  combined_plot <- p1 / p2 / p3
+  ts_filename <- sprintf("%s_%s_TimeSeries.png", prefix, condition)
+  ggsave(ts_filename, plot = combined_plot, width = 12, height = 10, dpi = 150, bg = "white")
+  
+  # ==========================================
+  # 5. 扫描统计量图表生成
+  # ==========================================
+  # 注意：这里调用的是基础版的 scan_anomaly_statistics
   tau_grid <- seq(max(L + 5, 30), min(n - L - 5, n - 30), by = 10)
   scan_df <- scan_anomaly_statistics(data_list, tau_grid, L, max(200, floor(M/2)), block_size, coords)
   
-  target <- data_list[[1]]; ref <- weighted_neighbors_idw(data_list, coords, 1, 2)
+  stat_filename <- sprintf("%s_%s_Statistics.png", prefix, condition)
   
-  # 修改点：扩展高度，并添加第三张合并图
-  png(filename = sprintf("%s_%s_TimeSeries.png", prefix, condition), width = 1200, height = 1000, res = 120)
-  par(mfrow=c(p + 1, 1), mar=c(4, 4, 2, 1)) # 修改点：增加一行用于联合图
-  
-  # 图1：逐一绘制时间序列 (包括正常/异常的竖线颜色控制)
-  for(j in 1:p) {
-    plot(1:n, target[,j], type="l", col="#d7301f", main=sprintf("Var %d Time Series (%s)", j, condition), ylab="Value", ylim=range(c(target[,j], ref[,j])))
-    lines(1:n, ref[,j], col="#2171b5", lty=2)
-    
-    if(condition != "Normal") abline(v=cp_true, col="gray40", lty=3, lwd=2)
-    
-    # 动态判断当前变量(j)是否被注入了异常(目标站与临近站不一致)
-    is_anomaly_var <- FALSE
-    if (condition == "Anomaly_Both") is_anomaly_var <- TRUE
-    else if (condition == "Anomaly_Var1" && j == 1) is_anomaly_var <- TRUE
-    else if (condition == "Anomaly_Var2" && j == 2) is_anomaly_var <- TRUE
-    
-    # 核心修改：异常变化变点用红色竖线，正常变化用绿色竖线
-    cp_col <- if(is_anomaly_var) "red" else "green"
-    
-    if(length(detected_cps) > 0) abline(v=detected_cps, col=cp_col, lty=1, lwd=2)
-  }
-  
-  # 图2：新增联合绘图区块
-  plot(1:n, target[,1], type="l", col="#e41a1c", main=sprintf("Combined View: Both Variables (%s)", condition), ylab="Value", ylim=range(c(target, ref)))
-  lines(1:n, ref[,1], col="#e41a1c", lty=2, lwd=1.5)
-  lines(1:n, target[,2], col="#377eb8", lty=1)
-  lines(1:n, ref[,2], col="#377eb8", lty=2, lwd=1.5)
-  
-  if(condition != "Normal") abline(v=cp_true, col="gray40", lty=3, lwd=2)
-  if(length(detected_cps) > 0) abline(v=detected_cps, col="black", lty=1, lwd=2) # 联合图用黑色凸显变点
-  
-  legend("topleft", legend=c("Var1 Target", "Var1 Ref", "Var2 Target", "Var2 Ref"),
-         col=c("#e41a1c", "#e41a1c", "#377eb8", "#377eb8"),
-         lty=c(1, 2, 1, 2), cex=0.8, horiz=TRUE, bty="n", lwd=c(1,1.5,1,1.5))
-  
-  dev.off()
-  
-  
-  png(filename = sprintf("%s_%s_Statistics.png", prefix, condition), width = 1200, height = 800, res = 120)
-  par(mfrow=c(2, 1), mar=c(4, 4, 2, 1))
   if(!is.null(scan_df)) {
-    plot(scan_df$tau, scan_df$S_obs, type="l", col="blue", main="SBB Statistic Trend", ylab="S_obs", lwd=1.5)
-    lines(scan_df$tau, scan_df$S_boot_q95, col="red", lty=2)
-    if(condition != "Normal") abline(v=cp_true, col="gray40", lty=3, lwd=2)
-    if(length(detected_cps) > 0) abline(v=detected_cps, col="#2ca25f", lty=1, lwd=2)
+    p_stat <- ggplot(scan_df, aes(x = tau)) +
+      geom_line(aes(y = S_obs, color = "S_obs"), linewidth = 1.2) +
+      geom_line(aes(y = S_boot_q95, color = "95% Threshold"), linetype = "dashed", linewidth = 1) +
+      scale_color_manual(values = c("S_obs" = "#3182bd", "95% Threshold" = "#de2d26")) +
+      {if(condition != "Normal") geom_vline(xintercept = cp_true, color = "gray40", linetype = "dotted", linewidth = 1.2)} +
+      {if(length(detected_cps) > 0) geom_vline(xintercept = detected_cps, color = cp_col_combined, linetype = "solid", linewidth = 1.2)} +
+      labs(title = "SBB Statistic Trend", x = NULL, y = "S_obs") +
+      theme_minimal(base_size = 14) +
+      theme(plot.title = element_text(face = "bold", hjust = 0.5), legend.title = element_blank(), legend.position = "right")
     
-    plot(scan_df$tau, scan_df$p_value, type="l", col="purple", main="P-value Trend", ylab="P-value", ylim=c(0,1), lwd=1.5)
-    abline(h=0.05, col="orange", lty=2, lwd=2)
-    if(condition != "Normal") abline(v=cp_true, col="gray40", lty=3, lwd=2)
-    if(length(detected_cps) > 0) abline(v=detected_cps, col="#2ca25f", lty=1, lwd=2)
+    p_pval <- ggplot(scan_df, aes(x = tau)) +
+      geom_line(aes(y = p_value), color = "#756bb1", linewidth = 1.2) +
+      geom_hline(yintercept = 0.05, color = "#ff7f00", linetype = "dashed", linewidth = 1) +
+      {if(condition != "Normal") geom_vline(xintercept = cp_true, color = "gray40", linetype = "dotted", linewidth = 1.2)} +
+      {if(length(detected_cps) > 0) geom_vline(xintercept = detected_cps, color = cp_col_combined, linetype = "solid", linewidth = 1.2)} +
+      labs(title = "P-value Trend", x = "Time (tau)", y = "P-value") +
+      coord_cartesian(ylim = c(0, 1)) +
+      theme_minimal(base_size = 14) +
+      theme(plot.title = element_text(face = "bold", hjust = 0.5))
+    
+    # 拼图并保存
+    stat_plot <- p_stat / p_pval
+    ggsave(stat_filename, plot = stat_plot, width = 12, height = 8, dpi = 150, bg = "white")
   }
-  dev.off()
-  cat(sprintf("\n=> 最佳运行图表已分离保存: [%s] 和 [%s]\n", 
-              sprintf("%s_%s_TimeSeries.png", prefix, condition), 
-              sprintf("%s_%s_Statistics.png", prefix, condition)))
+  
+  cat(sprintf("\n=> 最佳运行图表已分离保存:\n   [%s]\n   [%s]\n", ts_filename, stat_filename))
 }
+
 
 run_monte_carlo_1cp <- function(N_sim = 50, raw_coords) {
   # 修改点：将 condition 数组扩展至 4 种情况
