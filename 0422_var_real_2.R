@@ -304,91 +304,242 @@ run_case_logic_real_2cp_var <- function(condition, base_data_list, coords, cp_tr
 # ==========================================
 # 6. 美化版绘图函数 (适配 2CP)
 # ==========================================
+# generate_best_plots_real_2cp_var <- function(best_run, condition, cp_true, L, M, block_size, coords, prefix, n, p) {
+#   data_list <- best_run$data_list
+#   detected_cps <- best_run$cps
+  
+#   tau_grid <- seq(max(L + 2, 5), min(n - L - 2, n - 5), by = 1)
+#   scan_df <- scan_anomaly_statistics_var(data_list, tau_grid, L, max(100, floor(M/2)), block_size, coords)
+  
+#   target <- data_list[[1]]; ref <- weighted_neighbors_idw(data_list, coords, 1, 2)
+#   var_names <- c("PM2.5", "PM10")
+  
+#   png(filename = sprintf("%s_%s_2CP_Variance_TimeSeries.png", prefix, condition), width = 1200, height = 1000, res = 150)
+#   par(mfrow=c(p + 1, 1), mar=c(4, 4.5, 2.5, 1), cex.main=1.2, cex.lab=1.1) 
+  
+#   for(j in 1:p) {
+#     plot(1:n, target[,j], type="o", pch=20, cex=0.8, lwd=2, col="#d7301f", 
+#          main=sprintf("%s Time Series (2 CPs Variance Additive | %s)", var_names[j], condition), 
+#          ylab=sprintf("%s (ug/m3)", var_names[j]), xlab="Time Index", ylim=range(c(target[,j], ref[,j])))
+#     grid(col = "gray85", lty = 1, lwd = 1)
+#     lines(1:n, ref[,j], type="o", pch=20, cex=0.8, col="#2171b5", lty=2, lwd=2)
+    
+#     if(condition != "Normal") {
+#       for(ct in cp_true) abline(v=ct, col="gray40", lty=3, lwd=3)
+#     }
+    
+#     is_anomaly_var <- FALSE
+#     if (condition == "Anomaly_Both") is_anomaly_var <- TRUE
+#     else if (condition == "Anomaly_Var1" && j == 1) is_anomaly_var <- TRUE
+#     else if (condition == "Anomaly_Var2" && j == 2) is_anomaly_var <- TRUE
+    
+#     cp_col <- if(is_anomaly_var) "red" else "green"
+#     if(length(detected_cps) > 0) {
+#       for(dc in detected_cps) abline(v=dc, col=cp_col, lty=1, lwd=3)
+#     }
+#   }
+  
+#   plot(1:n, target[,1], type="o", pch=20, cex=0.7, lwd=2, col="#e41a1c", 
+#        main=sprintf("Combined View: PM2.5 & PM10 (%s)", condition), 
+#        ylab="Concentration", xlab="Time Index", ylim=range(c(target, ref)))
+#   grid(col = "gray85", lty = 1, lwd = 1)
+#   lines(1:n, ref[,1], type="o", pch=20, cex=0.7, col="#e41a1c", lty=2, lwd=2)
+#   lines(1:n, target[,2], type="o", pch=18, cex=0.7, col="#377eb8", lty=1, lwd=2)
+#   lines(1:n, ref[,2], type="o", pch=18, cex=0.7, col="#377eb8", lty=2, lwd=2)
+  
+#   if(condition != "Normal") {
+#     for(ct in cp_true) abline(v=ct, col="gray40", lty=3, lwd=3)
+#   }
+#   if(length(detected_cps) > 0) {
+#     for(dc in detected_cps) abline(v=dc, col="black", lty=1, lwd=3) 
+#   }
+  
+#   legend("topright", legend=c("PM2.5 Target", "PM2.5 Ref", "PM10 Target", "PM10 Ref"),
+#          col=c("#e41a1c", "#e41a1c", "#377eb8", "#377eb8"),
+#          pch=c(20, 20, 18, 18), lty=c(1, 2, 1, 2), lwd=2, cex=0.9, bg="white", box.col="gray")
+  
+#   dev.off()
+  
+#   png(filename = sprintf("%s_%s_2CP_Variance_Statistics.png", prefix, condition), width = 1200, height = 800, res = 150)
+#   par(mfrow=c(2, 1), mar=c(4, 4.5, 2.5, 1), cex.main=1.2)
+#   if(!is.null(scan_df)) {
+#     plot(scan_df$tau, scan_df$S_obs, type="o", pch=20, cex=0.6, lwd=2, col="#08519c", 
+#          main="Abs-Variance SBB Statistic Trend", ylab="S_obs", xlab="Time Index")
+#     grid(col = "gray85", lty = 1)
+#     lines(scan_df$tau, scan_df$S_boot_q95, type="l", col="#cb181d", lty=2, lwd=2)
+    
+#     if(condition != "Normal") {
+#       for(ct in cp_true) abline(v=ct, col="gray40", lty=3, lwd=3)
+#     }
+#     if(length(detected_cps) > 0) {
+#       for(dc in detected_cps) abline(v=dc, col="#2ca25f", lty=1, lwd=3)
+#     }
+    
+#     plot(scan_df$tau, scan_df$p_value, type="o", pch=20, cex=0.6, lwd=2, col="#54278f", 
+#          main="P-value Trend", ylab="P-value", xlab="Time Index", ylim=c(0,1))
+#     grid(col = "gray85", lty = 1)
+#     abline(h=0.05, col="#f16913", lty=2, lwd=2)
+    
+#     if(condition != "Normal") {
+#       for(ct in cp_true) abline(v=ct, col="gray40", lty=3, lwd=3)
+#     }
+#     if(length(detected_cps) > 0) {
+#       for(dc in detected_cps) abline(v=dc, col="#2ca25f", lty=1, lwd=3)
+#     }
+#   }
+#   dev.off()
+# }
+
+
 generate_best_plots_real_2cp_var <- function(best_run, condition, cp_true, L, M, block_size, coords, prefix, n, p) {
+  # 确保加载了必要的包
+  require(ggplot2)
+  require(tidyr)
+  require(dplyr)
+  require(patchwork) 
+  
   data_list <- best_run$data_list
   detected_cps <- best_run$cps
   
+  # 保留实际数据的精细扫描网格参数
   tau_grid <- seq(max(L + 2, 5), min(n - L - 2, n - 5), by = 1)
   scan_df <- scan_anomaly_statistics_var(data_list, tau_grid, L, max(100, floor(M/2)), block_size, coords)
   
-  target <- data_list[[1]]; ref <- weighted_neighbors_idw(data_list, coords, 1, 2)
+  target <- data_list[[1]]
+  ref <- weighted_neighbors_idw(data_list, coords, 1, 2)
   var_names <- c("PM2.5", "PM10")
   
-  png(filename = sprintf("%s_%s_2CP_Variance_TimeSeries.png", prefix, condition), width = 1200, height = 1000, res = 150)
-  par(mfrow=c(p + 1, 1), mar=c(4, 4.5, 2.5, 1), cex.main=1.2, cex.lab=1.1) 
+  # ==========================================
+  # 1. 实际数据时序对齐与长格式转换 (剥离属性防变灰)
+  # ==========================================
+  target_v1 <- as.numeric(as.matrix(target)[, 1])
+  ref_v1    <- as.numeric(as.matrix(ref)[, 1])
+  target_v2 <- as.numeric(as.matrix(target)[, 2])
+  ref_v2    <- as.numeric(as.matrix(ref)[, 2])
   
-  for(j in 1:p) {
-    plot(1:n, target[,j], type="o", pch=20, cex=0.8, lwd=2, col="#d7301f", 
-         main=sprintf("%s Time Series (2 CPs Variance Additive | %s)", var_names[j], condition), 
-         ylab=sprintf("%s (ug/m3)", var_names[j]), xlab="Time Index", ylim=range(c(target[,j], ref[,j])))
-    grid(col = "gray85", lty = 1, lwd = 1)
-    lines(1:n, ref[,j], type="o", pch=20, cex=0.8, col="#2171b5", lty=2, lwd=2)
-    
-    if(condition != "Normal") {
-      for(ct in cp_true) abline(v=ct, col="gray40", lty=3, lwd=3)
-    }
-    
-    is_anomaly_var <- FALSE
-    if (condition == "Anomaly_Both") is_anomaly_var <- TRUE
-    else if (condition == "Anomaly_Var1" && j == 1) is_anomaly_var <- TRUE
-    else if (condition == "Anomaly_Var2" && j == 2) is_anomaly_var <- TRUE
-    
-    cp_col <- if(is_anomaly_var) "red" else "green"
-    if(length(detected_cps) > 0) {
-      for(dc in detected_cps) abline(v=dc, col=cp_col, lty=1, lwd=3)
-    }
+  df_time <- data.frame(
+    Time = 1:n,
+    V1 = target_v1,
+    V2 = ref_v1,
+    V3 = target_v2,
+    V4 = ref_v2
+  )
+  colnames(df_time) <- c("Time", "PM2.5_Target", "PM2.5_Ref", "PM10_Target", "PM10_Ref")
+  
+  df_long <- df_time %>%
+    pivot_longer(cols = -Time, names_to = c("Variable", "Type"), names_sep = "_", values_to = "Value") %>%
+    mutate(Group = paste(Variable, Type, sep = " - "))
+  
+  # ==========================================
+  # 2. 面向实际数据的视觉字典 (点+线)
+  # ==========================================
+  custom_colors <- c(
+    "PM2.5 - Target" = "#e31a1c", # 鲜红色 (PM2.5 目标)
+    "PM2.5 - Ref"    = "#06ef58", # 亮橙色 (PM2.5 临近)
+    "PM10 - Target" = "#1aa0c1", # 深蓝色 (PM10 目标)
+    "PM10 - Ref"    = "#420df0"  # 浅绿色 (PM10 临近)
+  )
+  custom_linetypes <- c(
+    "PM2.5 - Target" = "solid", "PM2.5 - Ref" = "dashed",
+    "PM10 - Target"  = "solid", "PM10 - Ref"  = "dashed"
+  )
+  custom_shapes <- c(
+    "PM2.5 - Target" = 16, "PM2.5 - Ref" = 16,
+    "PM10 - Target"  = 18, "PM10 - Ref"  = 18 
+  )
+  custom_linewidths <- c(
+    "PM2.5 - Target" = 1.0, "PM2.5 - Ref" = 0.7,
+    "PM10 - Target"  = 1.0, "PM10 - Ref"  = 0.7
+  )
+  
+  # ==========================================
+  # 3. 封装时序图绘图函数 (原生支持多变点向量)
+  # ==========================================
+  plot_ts <- function(data, title, y_label, cp_color) {
+    p_base <- ggplot(data, aes(x = Time, y = Value, color = Group, linetype = Group, shape = Group)) +
+      geom_line(aes(size = Group), alpha = 0.85) +
+      geom_point(size = 1.8, alpha = 0.9) +
+      scale_color_manual(values = custom_colors) +
+      scale_linetype_manual(values = custom_linetypes) +
+      scale_shape_manual(values = custom_shapes) +
+      scale_size_manual(values = custom_linewidths) +
+      # 如果 cp_true 是多个值的向量，ggplot 会自动画出多条虚线，无需 for 循环
+      {if(condition != "Normal" && length(cp_true) > 0) geom_vline(xintercept = cp_true, color = "gray40", linetype = "dotted", size = 1.2)} +
+      # 同理，自动支持画出多个检测到的变点竖线
+      {if(length(detected_cps) > 0) geom_vline(xintercept = detected_cps, color = cp_color, linetype = "solid", size = 1.2)} +
+      labs(title = title, x = NULL, y = y_label) +
+      theme_minimal(base_size = 14) +
+      theme(
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
+        legend.position = "right",
+        legend.title = element_blank(),
+        legend.key.width = unit(2.5, "cm"), 
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_line(color = "gray85")
+      )
+    return(p_base)
   }
   
-  plot(1:n, target[,1], type="o", pch=20, cex=0.7, lwd=2, col="#e41a1c", 
-       main=sprintf("Combined View: PM2.5 & PM10 (%s)", condition), 
-       ylab="Concentration", xlab="Time Index", ylim=range(c(target, ref)))
-  grid(col = "gray85", lty = 1, lwd = 1)
-  lines(1:n, ref[,1], type="o", pch=20, cex=0.7, col="#e41a1c", lty=2, lwd=2)
-  lines(1:n, target[,2], type="o", pch=18, cex=0.7, col="#377eb8", lty=1, lwd=2)
-  lines(1:n, ref[,2], type="o", pch=18, cex=0.7, col="#377eb8", lty=2, lwd=2)
+  # ==========================================
+  # 4. 判定竖线颜色与生成时序图表
+  # ==========================================
+  is_anomaly_var1 <- condition %in% c("Anomaly_Both", "Anomaly_Var1")
+  cp_col1 <- ifelse(is_anomaly_var1, "red", "green")
   
-  if(condition != "Normal") {
-    for(ct in cp_true) abline(v=ct, col="gray40", lty=3, lwd=3)
-  }
-  if(length(detected_cps) > 0) {
-    for(dc in detected_cps) abline(v=dc, col="black", lty=1, lwd=3) 
-  }
+  is_anomaly_var2 <- condition %in% c("Anomaly_Both", "Anomaly_Var2")
+  cp_col2 <- ifelse(is_anomaly_var2, "red", "green")
   
-  legend("topright", legend=c("PM2.5 Target", "PM2.5 Ref", "PM10 Target", "PM10 Ref"),
-         col=c("#e41a1c", "#e41a1c", "#377eb8", "#377eb8"),
-         pch=c(20, 20, 18, 18), lty=c(1, 2, 1, 2), lwd=2, cex=0.9, bg="white", box.col="gray")
+  cp_col_combined <- ifelse(condition != "Normal", "red", "green")
   
-  dev.off()
+  # 注意标题更新为 (2 CPs Variance Additive)
+  p1 <- plot_ts(df_long %>% filter(Variable == "PM2.5"), sprintf("PM2.5 Time Series (2 CPs Variance Additive | %s)", condition), "PM2.5 (ug/m3)", cp_col1)
+  p2 <- plot_ts(df_long %>% filter(Variable == "PM10"), sprintf("PM10 Time Series (2 CPs Variance Additive | %s)", condition), "PM10 (ug/m3)", cp_col2)
+  p3 <- plot_ts(df_long, sprintf("Combined View: PM2.5 & PM10 (%s)", condition), "Concentration", cp_col_combined) +
+        labs(x = "Time Index") +
+        theme(legend.position = "bottom")
   
-  png(filename = sprintf("%s_%s_2CP_Variance_Statistics.png", prefix, condition), width = 1200, height = 800, res = 150)
-  par(mfrow=c(2, 1), mar=c(4, 4.5, 2.5, 1), cex.main=1.2)
+  # 拼图并保存带 2CP 后缀的文件名
+  combined_plot <- p1 / p2 / p3
+  ts_filename <- sprintf("%s_%s_2CP_Variance_TimeSeries.png", prefix, condition)
+  ggsave(ts_filename, plot = combined_plot, width = 12, height = 10, dpi = 150, bg = "white")
+  
+  # ==========================================
+  # 5. 扫描统计量图表生成
+  # ==========================================
+  stat_filename <- sprintf("%s_%s_2CP_Variance_Statistics.png", prefix, condition)
+  
   if(!is.null(scan_df)) {
-    plot(scan_df$tau, scan_df$S_obs, type="o", pch=20, cex=0.6, lwd=2, col="#08519c", 
-         main="Abs-Variance SBB Statistic Trend", ylab="S_obs", xlab="Time Index")
-    grid(col = "gray85", lty = 1)
-    lines(scan_df$tau, scan_df$S_boot_q95, type="l", col="#cb181d", lty=2, lwd=2)
+    p_stat <- ggplot(scan_df, aes(x = tau)) +
+      geom_line(aes(y = S_obs, color = "S_obs"), size = 1.0) +
+      geom_point(aes(y = S_obs, color = "S_obs"), size = 1.2, alpha = 0.8) +
+      geom_line(aes(y = S_boot_q95, color = "95% Threshold"), linetype = "dashed", size = 1.0) +
+      scale_color_manual(values = c("S_obs" = "#08519c", "95% Threshold" = "#cb181d")) +
+      {if(condition != "Normal" && length(cp_true) > 0) geom_vline(xintercept = cp_true, color = "gray40", linetype = "dotted", size = 1.2)} +
+      {if(length(detected_cps) > 0) geom_vline(xintercept = detected_cps, color = cp_col_combined, linetype = "solid", size = 1.2)} +
+      labs(title = "Abs-Variance SBB Statistic Trend", x = "Time Index", y = "S_obs") +
+      theme_minimal(base_size = 14) +
+      theme(plot.title = element_text(face = "bold", hjust = 0.5), legend.title = element_blank(), legend.position = "right", panel.grid.major = element_line(color = "gray85"))
     
-    if(condition != "Normal") {
-      for(ct in cp_true) abline(v=ct, col="gray40", lty=3, lwd=3)
-    }
-    if(length(detected_cps) > 0) {
-      for(dc in detected_cps) abline(v=dc, col="#2ca25f", lty=1, lwd=3)
-    }
+    p_pval <- ggplot(scan_df, aes(x = tau)) +
+      geom_line(aes(y = p_value), color = "#54278f", size = 1.0) +
+      geom_point(aes(y = p_value), color = "#54278f", size = 1.2, alpha = 0.8) +
+      # 遵循该版本代码的 0.05 阈值
+      geom_hline(yintercept = 0.05, color = "#f16913", linetype = "dashed", size = 1.0) +
+      {if(condition != "Normal" && length(cp_true) > 0) geom_vline(xintercept = cp_true, color = "gray40", linetype = "dotted", size = 1.2)} +
+      {if(length(detected_cps) > 0) geom_vline(xintercept = detected_cps, color = cp_col_combined, linetype = "solid", size = 1.2)} +
+      labs(title = "P-value Trend", x = "Time Index", y = "P-value") +
+      coord_cartesian(ylim = c(0, 1)) +
+      theme_minimal(base_size = 14) +
+      theme(plot.title = element_text(face = "bold", hjust = 0.5), panel.grid.major = element_line(color = "gray85"))
     
-    plot(scan_df$tau, scan_df$p_value, type="o", pch=20, cex=0.6, lwd=2, col="#54278f", 
-         main="P-value Trend", ylab="P-value", xlab="Time Index", ylim=c(0,1))
-    grid(col = "gray85", lty = 1)
-    abline(h=0.05, col="#f16913", lty=2, lwd=2)
-    
-    if(condition != "Normal") {
-      for(ct in cp_true) abline(v=ct, col="gray40", lty=3, lwd=3)
-    }
-    if(length(detected_cps) > 0) {
-      for(dc in detected_cps) abline(v=dc, col="#2ca25f", lty=1, lwd=3)
-    }
+    stat_plot <- p_stat / p_pval
+    ggsave(stat_filename, plot = stat_plot, width = 12, height = 8, dpi = 150, bg = "white")
   }
-  dev.off()
+  
+  cat(sprintf("\n=> 最佳运行图表已分离保存:\n   [%s]\n   [%s]\n", ts_filename, stat_filename))
 }
+
+
 
 # ==========================================
 # 7. 主程序入口
