@@ -1,3 +1,4 @@
+######代码主要是模拟单个均值变点突变的情况，复盘后发现不需要考虑这么多的情况，因为主要是针对多变量的双变点！
 library(mclust)
 library(SNSeg)
 library(mvtnorm)
