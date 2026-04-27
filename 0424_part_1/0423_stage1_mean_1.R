@@ -85,7 +85,7 @@ results_list <- list()
 all_sim_data <- vector("list", num_sim)
 
 for (sim in 1:num_sim) {
-  if(sim %% 10 == 0) #cat(sprintf("  进行到第 %d 次模拟...\n", sim))
+  if(sim %% 10 == 0) cat(sprintf("  进行到第 %d 次模拟...\n", sim))
   
   # 生成当次模拟的四种场景数据
   S1 <- data.frame(Time=1:n, Var1 = generate_ar1_data(n, 250, mean_after=shift_v1), Var2 = generate_ar1_data(n, NULL))

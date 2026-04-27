@@ -4,8 +4,8 @@ library(patchwork)
 library(mclust)  
 
 n <- 800            
-margin_tol <- 15      
-num_sim <- 50         
+margin_tol <- 10      
+num_sim <- 5         
 
 
 means_v1_0 <- c(0)
@@ -98,7 +98,7 @@ results_list <- list()
 all_sim_data <- vector("list", num_sim)
 
 for (sim in 1:num_sim) {
-     if(sim %% 5 == 0) #cat(sprintf("  进行到第 %d 次模拟...\n", sim))
+     if(sim %% 5 == 0) cat(sprintf("  进行到第 %d 次模拟...\n", sim))
   
   # 生成当次模拟的 9 种场景数据
   S1 <- data.frame(Time=1:n, Var1 = generate_ar1_data(n, c(250, 550), means_v1_2), Var2 = generate_ar1_data(n, NULL, means_v2_0))
