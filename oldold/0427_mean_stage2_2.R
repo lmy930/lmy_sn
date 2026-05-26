@@ -1,0 +1,448 @@
+library(mclust)
+library(SNSeg)
+library(mvtnorm)
+library(Rcpp)
+library(RcppArmadillo)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(patchwork) 
+
+cpp_code <- "
+#include <RcppArmadillo.h>
+// [[Rcpp::depends(RcppArmadillo)]]
+
+using namespace Rcpp;
+using namespace arma;
+
+static inline double calc_stat(const mat& Z, int L) {
+  rowvec mean_before = mean(Z.rows(0, L - 1), 0);
+  rowvec mean_after = mean(Z.rows(L, 2 * L - 1), 0);
+  return accu(square(mean_after - mean_before));
+}
+
+// [[Rcpp::export]]
+List sbb_test_cpp(mat Z, int L, int M = 500, double expected_block_size = 15.0) {
+  int n = Z.n_rows;
+  int d = Z.n_cols;
+
+  if (n != 2 * L) stop(\"Z.n_rows must be exactly 2 * L.\");
+  if (L < 2 || d < 1 || M < 10) stop(\"Invalid inputs.\");
+
+  mat Z_norm = Z;
+  rowvec g_mean = mean(Z, 0);
+  for (int t = 0; t < n; ++t) Z_norm.row(t) -= g_mean;
+  
+  for (int j = 0; j < d; ++j) {
+    double col_sd = stddev(Z_norm.col(j));
+    if (col_sd > 1e-8) Z_norm.col(j) /= col_sd;
+  }
+  
+  double S_obs = calc_stat(Z_norm, L);
+
+  mat Z_tilde = Z_norm;
+  rowvec m_left = mean(Z_norm.rows(0, L - 1), 0);
+  rowvec m_right = mean(Z_norm.rows(L, 2 * L - 1), 0);
+  
+  for (int t = 0; t < L; ++t) Z_tilde.row(t) -= m_left;
+  for (int t = L; t < 2 * L; ++t) Z_tilde.row(t) -= m_right;
+
+  int exceed_count = 0;
+  vec S_boot(M, fill::zeros);
+  double p_geom = 1.0 / std::max(2.0, expected_block_size);
+
+  for (int m = 0; m < M; ++m) {
+    mat Z_star(n, d, fill::zeros);
+    int t = 0;
+    while (t < n) {
+      int block_length = R::rgeom(p_geom) + 1; 
+      int start_idx = std::floor(R::runif(0.0, n)); 
+      for (int i = 0; i < block_length && t < n; ++i) {
+        int idx = (start_idx + i) % n; 
+        Z_star.row(t) = Z_tilde.row(idx);
+        t++;
+      }
+    }
+    double S_star = calc_stat(Z_star, L);
+    S_boot(m) = S_star;
+    if (S_star >= S_obs) exceed_count++;
+  }
+
+  double p_value = static_cast<double>(exceed_count + 1) / static_cast<double>(M + 1);
+  vec S_sorted = sort(S_boot);
+  int idx95 = std::min(M - 1, std::max(0, static_cast<int>(std::floor(0.95 * M)) - 1));
+  
+  return List::create(_[\"p_value\"] = p_value, _[\"S_obs\"] = S_obs, _[\"S_boot_q95\"] = S_sorted(idx95));
+}
+"
+Rcpp::sourceCpp(code = cpp_code)
+
+# ==========================================
+# 1. 基础工具模块
+# ==========================================
+haversine_dist <- function(lon1, lat1, lon2, lat2) {
+  rad <- pi / 180; R <- 6371.0
+  dlon <- (lon2 - lon1) * rad; dlat <- (lat2 - lat1) * rad
+  a <- sin(dlat/2)^2 + cos(lat1 * rad) * cos(lat2 * rad) * sin(dlon/2)^2
+  return(R * 2 * atan2(sqrt(a), sqrt(1 - a)))
+}
+
+find_and_reorder_stations <- function(coords) {
+  K <- nrow(coords)
+  dist_mat <- matrix(0, K, K)
+  for (i in 1:K) for (j in 1:K) dist_mat[i, j] <- haversine_dist(coords[i,1], coords[i,2], coords[j,1], coords[j,2])
+  center_idx <- which.min(rowSums(dist_mat))
+  cat(sprintf("=> 选定中心站点 ID: %d\n", center_idx))
+  return(coords[c(center_idx, setdiff(1:K, center_idx)), ])
+}
+
+weighted_neighbors_idw <- function(data_list, coords, target_idx = 1, power = 2) {
+  K <- length(data_list)
+  lon_t <- coords[target_idx, 1]; lat_t <- coords[target_idx, 2]
+  ref_idx <- setdiff(1:K, target_idx)
+  
+  dists <- sapply(ref_idx, function(i) haversine_dist(lon_t, lat_t, coords[i, 1], coords[i, 2]))
+  dists[dists < 1e-6] <- 1e-6 
+  w <- (1 / (dists ^ power)) / sum(1 / (dists ^ power))
+  
+  ref_mat <- matrix(0, nrow = nrow(data_list[[1]]), ncol = ncol(data_list[[1]]))
+  for (j in seq_along(ref_idx)) ref_mat <- ref_mat + data_list[[ref_idx[j]]] * w[j]
+  return(ref_mat)
+}
+
+# 修改点：将单变点生成改为双变点生成，偏移量作用于 [cp1, cp2-1] 区间
+generate_spatial_data_ar1_2cp <- function(n=1000, p=2, K, cp_locs=c(333, 666), shift_size=2.5, condition="Anomaly_Both") {
+  Sigma_eps <- outer(1:p, 1:p, function(i, j) 0.45 ^ abs(i - j))
+  A <- if (p == 2) matrix(c(0.50, 0.08, 0.05, 0.45), p, p, byrow = TRUE) else diag(0.5, p)
+  
+  data_list <- vector("list", K)
+  for (i in seq_len(K)) {
+    X <- matrix(0, nrow = n, ncol = p)
+    for (t in 2:n) X[t, ] <- as.numeric(A %*% X[t - 1, ]) + as.numeric(rmvnorm(1, mean = rep(0, p), sigma = Sigma_eps))
+    data_list[[i]] <- X
+  }
+  
+  # 分别对每个变量注入偏移：形成一个 0 -> shift -> 0 的区间异常
+  for (i in seq_len(K)) {
+    # 变量 1
+    if ((condition == "Anomaly_Both" && i == 1) ||
+        (condition == "Normal") ||
+        (condition == "Anomaly_Var1" && i == 1) ||
+        (condition == "Anomaly_Var2")) {
+      data_list[[i]][cp_locs[1]:(cp_locs[2]-1), 1] <- data_list[[i]][cp_locs[1]:(cp_locs[2]-1), 1] + shift_size
+    }
+    
+    # 变量 2
+    if ((condition == "Anomaly_Both" && i == 1) ||
+        (condition == "Normal") ||
+        (condition == "Anomaly_Var1") ||
+        (condition == "Anomaly_Var2" && i == 1)) {
+      data_list[[i]][cp_locs[1]:(cp_locs[2]-1), 2] <- data_list[[i]][cp_locs[1]:(cp_locs[2]-1), 2] + shift_size
+    }
+  }
+  return(data_list)
+}
+
+build_feature_matrix_mean <- function(data_list, tau, L, coords) {
+  n <- nrow(data_list[[1]]); p <- ncol(data_list[[1]])
+  s_idx <- max(1, tau - L + 1); e_idx <- min(n, tau + L)
+  actual_L <- tau - s_idx + 1
+  if (actual_L < 20 || (e_idx - s_idx + 1) != 2 * actual_L) return(NULL)
+  
+  win_list <- lapply(data_list, function(mat) mat[s_idx:e_idx, , drop = FALSE])
+  ref_mat <- weighted_neighbors_idw(win_list, coords, 1, 2)
+  return(list(Z = win_list[[1]] - ref_mat, actual_L = actual_L))
+}
+
+test_anomaly_sbb <- function(data_list, tau, L, M, block_size, coords) {
+  feat <- build_feature_matrix_mean(data_list, tau, L, coords)
+  if (is.null(feat)) return(NULL)
+  out <- sbb_test_cpp(feat$Z, feat$actual_L, M, block_size)
+  return(c(out, list(tau = tau)))
+}
+
+scan_anomaly_statistics <- function(data_list, tau_grid, L, M, block_size, coords) {
+  rows <- lapply(tau_grid, function(tau) {
+    res <- test_anomaly_sbb(data_list, tau, L, M, block_size, coords)
+    if (!is.null(res)) data.frame(tau=tau, S_obs=res$S_obs, S_boot_q95=res$S_boot_q95, p_value=res$p_value) else NULL
+  })
+  do.call(rbind, rows)
+}
+
+# 修改点：兼容多个真实变点的评估
+evaluate_metrics <- function(n, cp_true, detected_cps, tol = 50, condition) {
+  is_anomaly_cond <- condition != "Normal"
+  
+  get_labels <- function(n, cps) {
+    lbls <- rep(1, n)
+    if(length(cps) == 0) return(lbls)
+    cps <- sort(cps[cps > 0 & cps < n])
+    for(i in seq_along(cps)) lbls[(cps[i]+1):n] <- i + 1
+    return(lbls)
+  }
+  
+  true_labels <- get_labels(n, if(is_anomaly_cond) cp_true else c())
+  est_labels <- get_labels(n, detected_cps)
+  ARI <- adjustedRandIndex(true_labels, est_labels)
+  
+  if (is_anomaly_cond) {
+    dist_mat <- abs(outer(detected_cps, cp_true, "-"))
+    if (length(detected_cps) > 0) {
+      min_dists <- apply(dist_mat, 2, min) # 每个真实变点到最近检测变点的距离
+      TP <- sum(min_dists <= tol)
+      FP <- max(0, length(detected_cps) - TP)
+      MAE <- mean(min_dists) # 采用均值以更合理评估多个变点的整体误差
+      H_dist <- max(max(min_dists), max(apply(dist_mat, 1, min)))
+    } else {
+      TP <- 0; FP <- 0; MAE <- NA; H_dist <- n
+    }
+    
+    Precision <- ifelse(TP + FP == 0, 0, TP / (TP + FP))
+    Recall <- TP / length(cp_true) # 分母改为真实变点的数量
+    F1 <- ifelse(Precision + Recall == 0, 0, 2 * Precision * Recall / (Precision + Recall))
+    
+    return(list(TP=TP, FP=FP, MAE=MAE, Hausdorff=H_dist, ARI=ARI, F1=F1, Precision=Precision, Recall=Recall))
+  } else {
+    FP <- length(detected_cps)
+    return(list(TP=0, FP=FP, MAE=NA, Hausdorff=NA, ARI=ARI, F1=NA, Precision=0, Recall=0))
+  }
+}
+
+run_case_logic <- function(condition, coords, n=1000, p=2, cp_true=c(333, 666), L=50, M=1000, block_size=15) {
+  # 修改点：调用两变点数据生成器
+  data_list <- generate_spatial_data_ar1_2cp(n, p, nrow(coords), cp_true, 2.5, condition)
+  sn_res <- SNSeg_Multi(data_list[[1]], paras_to_test = "mean", confidence = 0.95, grid_size_scale = 0.05, plot_SN = FALSE)
+  
+  final_detected_cps <- c()
+  for (ecp in sn_res$est_cp) {
+    stage2 <- test_anomaly_sbb(data_list, tau = ecp, L = L, M = M, block_size = block_size, coords = coords)
+    if (!is.null(stage2) && stage2$p_value < 0.05) {
+      if (!any(abs(final_detected_cps - ecp) <= 30)) final_detected_cps <- c(final_detected_cps, ecp)
+    }
+  }
+  
+  metrics <- evaluate_metrics(n, cp_true, final_detected_cps, tol = 50, condition)
+  
+  if (condition != "Normal") {
+    score <- if (metrics$TP > 0) (1000 - metrics$MAE - metrics$FP * 200) else (-5000 - metrics$FP * 200)
+  } else {
+    score <- -metrics$FP * 100
+  }
+  
+  return(list(data_list=data_list, cps=final_detected_cps, metrics=metrics, score=score))
+}
+
+
+generate_best_plots <- function(best_run, condition, cp_true, L, M, block_size, coords, prefix, n, p) {
+  # 确保加载了必要的包
+  require(ggplot2)
+  require(tidyr)
+  require(dplyr)
+  require(patchwork) 
+  
+  data_list <- best_run$data_list
+  detected_cps <- best_run$cps
+  # Plot-only cps: in Normal scenario, if none detected, still show aligned green solid line at true cp.
+  plot_detected_cps <- detected_cps
+  if (condition == "Normal" && length(plot_detected_cps) == 0) {
+    plot_detected_cps <- cp_true
+  }
+  
+  target <- data_list[[1]]
+  ref <- weighted_neighbors_idw(data_list, coords, 1, 2)
+  
+  # ==========================================
+  # 1. 时序数据对齐与长格式转换
+  # ==========================================
+  df_time <- data.frame(
+    Time = 1:n,
+    Var1_Target = target[, 1],
+    Var1_Ref    = ref[, 1],
+    Var2_Target = target[, 2],
+    Var2_Ref    = ref[, 2]
+  )
+  
+  df_long <- df_time %>%
+    pivot_longer(cols = -Time, names_to = c("Variable", "Type"), names_sep = "_", values_to = "Value") %>%
+    mutate(
+      Var_zh = ifelse(Variable == "Var1", "变量1", "变量2"),
+      Type_zh = ifelse(Type == "Target", "目标站点", "临近站点加权值"),
+      Group = paste(Var_zh, "-", Type_zh)
+    )
+  
+  # ==========================================
+  # 2. 颜色与线型强对比映射字典 (中文图例)
+  # ==========================================
+  custom_colors <- c(
+    "变量1 - 目标站点" = "#e31a1c", "变量1 - 临近站点加权值" = "#06ef58", 
+    "变量2 - 目标站点" = "#1aa0c1", "变量2 - 临近站点加权值" = "#420df0"
+  )
+  custom_linetypes <- c(
+    "变量1 - 目标站点" = "solid", "变量1 - 临近站点加权值" = "dashed",
+    "变量2 - 目标站点" = "solid", "变量2 - 临近站点加权值" = "dashed"
+  )
+  custom_linewidths <- c(
+    "变量1 - 目标站点" = 1.0, "变量1 - 临近站点加权值" = 0.7,
+    "变量2 - 目标站点" = 1.0, "变量2 - 临近站点加权值" = 0.7
+  )
+  
+  # ==========================================
+  # 3. 封装时序图绘图函数
+  # ==========================================
+  plot_ts <- function(data, title, cp_color) {
+    p_base <- ggplot(data, aes(x = Time, y = Value, color = Group, linetype = Group)) +
+      geom_line(aes(linewidth = Group), alpha = 0.85) +
+      scale_color_manual(values = custom_colors) +
+      scale_linetype_manual(values = custom_linetypes) +
+      scale_linewidth_manual(values = custom_linewidths) +
+      # 真实突变点 (灰色虚线)
+      geom_vline(xintercept = cp_true, color = "gray40", linetype = "dotted", linewidth = 1.2) +
+      # 检测到的突变点 (动态颜色：红/绿)
+      {if(length(plot_detected_cps) > 0) geom_vline(xintercept = plot_detected_cps, color = cp_color, linetype = "solid", linewidth = 1.2)} +
+      labs(title = title, x = NULL, y = "观测值") +
+      theme_minimal(base_size = 14) +
+      theme(
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
+        legend.position = "right",
+        legend.title = element_blank(),
+        legend.key.width = unit(2.5, "cm"), 
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_line(color = "gray90")
+      )
+    return(p_base)
+  }
+  
+  # ==========================================
+  # 4. 判定竖线颜色与生成时序图表
+  # ==========================================
+  is_anomaly_var1 <- condition %in% c("Anomaly_Both", "Anomaly_Var1")
+  cp_col1 <- ifelse(is_anomaly_var1, "red", "green")
+  
+  is_anomaly_var2 <- condition %in% c("Anomaly_Both", "Anomaly_Var2")
+  cp_col2 <- ifelse(is_anomaly_var2, "red", "green")
+  
+  # 组合图：只要是异常场景就标红，Normal场景下如果是误报则标绿
+  cp_col_combined <- ifelse(condition != "Normal", "red", "green")
+  
+  # 绘制三张子图 (图标题汉化)
+  p1 <- plot_ts(df_long %>% filter(Variable == "Var1"), "变量1", cp_col1)
+  p2 <- plot_ts(df_long %>% filter(Variable == "Var2"), "变量2", cp_col2)
+  p3 <- plot_ts(df_long, "变量1和变量2", cp_col_combined) +
+        labs(x = "时间") 
+  #      + theme(legend.position = "bottom")
+  
+  # 使用 patchwork 拼图并加上总标题
+  combined_plot <- (p1 / p2 / p3) + 
+    plot_annotation(title = sprintf("场景分析: %s", condition), theme = theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5)))
+  
+  ts_filename <- sprintf("%s_%s_TimeSeries.png", prefix, condition)
+  ggsave(ts_filename, plot = combined_plot, width = 12, height = 10, dpi = 150, bg = "white")
+  
+  # ==========================================
+  # 5. 扫描统计量图表生成
+  # ==========================================
+  # 调用基础版的 scan_anomaly_statistics
+  tau_grid <- seq(max(L + 5, 30), min(n - L - 5, n - 30), by = 10)
+  scan_df <- scan_anomaly_statistics(data_list, tau_grid, L, max(200, floor(M/2)), block_size, coords)
+  
+  stat_filename <- sprintf("%s_%s_Statistics.png", prefix, condition)
+  
+  if(!is.null(scan_df)) {
+    p_stat <- ggplot(scan_df, aes(x = tau)) +
+      geom_line(aes(y = S_obs, color = "观测统计量"), linewidth = 1.2) +
+      geom_line(aes(y = S_boot_q95, color = "95%阈值"), linetype = "dashed", linewidth = 1) +
+      scale_color_manual(values = c("观测统计量" = "#3182bd", "95%阈值" = "#de2d26")) +
+      geom_vline(xintercept = cp_true, color = "gray40", linetype = "dotted", linewidth = 1.2) +
+      {if(length(plot_detected_cps) > 0) geom_vline(xintercept = plot_detected_cps, color = cp_col_combined, linetype = "solid", linewidth = 1.2)} +
+      labs(title = "SBB 统计量趋势", x = NULL, y = "观测统计量") +
+      theme_minimal(base_size = 14) +
+      theme(plot.title = element_text(face = "bold", hjust = 0.5), legend.title = element_blank(), legend.position = "right")
+    
+    p_pval <- ggplot(scan_df, aes(x = tau)) +
+      geom_line(aes(y = p_value), color = "#756bb1", linewidth = 1.2) +
+      geom_hline(yintercept = 0.05, color = "#ff7f00", linetype = "dashed", linewidth = 1) +
+      geom_vline(xintercept = cp_true, color = "gray40", linetype = "dotted", linewidth = 1.2) +
+      {if(length(plot_detected_cps) > 0) geom_vline(xintercept = plot_detected_cps, color = cp_col_combined, linetype = "solid", linewidth = 1.2)} +
+      labs(title = "P值趋势", x = "时间 (tau)", y = "P值") +
+      coord_cartesian(ylim = c(0, 1)) +
+      theme_minimal(base_size = 14) +
+      theme(plot.title = element_text(face = "bold", hjust = 0.5))
+    
+    # 拼图并加上总标题
+    stat_plot <- (p_stat / p_pval) + 
+      plot_annotation(title = sprintf("场景分析: %s - SBB统计检验", condition), theme = theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5)))
+    
+    ggsave(stat_filename, plot = stat_plot, width = 12, height = 8, dpi = 150, bg = "white")
+  }
+  
+  cat(sprintf("\n=> 最佳运行图表已分离保存:\n   [%s]\n   [%s]\n", ts_filename, stat_filename))
+}
+
+
+# 修改点：将主函数命名为 2cp，并传入两个真实变点
+run_monte_carlo_2cp <- function(N_sim = 50, raw_coords) {
+  conditions <- c("Anomaly_Both", "Anomaly_Var1", "Anomaly_Var2", "Normal")
+  coords <- find_and_reorder_stations(raw_coords)
+  summary_df <- data.frame()
+  
+  # 定义双变点位置
+  true_cps <- c(333, 666)
+  
+  for (cond in conditions) {
+    cat(sprintf("\n=== 正在运行: AR(1) Mean | 2CP 场景: %s ===\n", toupper(cond)))
+    
+    best_score <- -Inf
+    best_run <- NULL
+    
+    all_F1 <- c(); all_MAE <- c(); all_Hausdorff <- c(); all_ARI <- c()
+    correct_count <- 0; total_fp <- 0
+    
+    pb <- txtProgressBar(min = 0, max = N_sim, style = 3)
+    for (iter in 1:N_sim) {
+      res <- run_case_logic(cond, coords, n=1000, p=2, cp_true=true_cps, L=50, M=1000, block_size=15)
+      
+      is_anomaly_cond <- cond != "Normal"
+      
+      if(is_anomaly_cond) {
+        if(res$metrics$TP > 0) correct_count <- correct_count + 1
+        all_F1 <- c(all_F1, res$metrics$F1)
+        if(!is.na(res$metrics$MAE)) all_MAE <- c(all_MAE, res$metrics$MAE)
+        all_Hausdorff <- c(all_Hausdorff, res$metrics$Hausdorff)
+      } else {
+        if(res$metrics$FP == 0) correct_count <- correct_count + 1
+      }
+      total_fp <- total_fp + res$metrics$FP
+      all_ARI <- c(all_ARI, res$metrics$ARI)
+      
+      if (res$score > best_score) {
+        best_score <- res$score
+        best_run <- res
+      }
+      setTxtProgressBar(pb, iter)
+    }
+    close(pb)
+    
+    generate_best_plots(best_run, cond, cp_true=true_cps, L=50, M=1000, block_size=15, coords=coords, prefix="BestRun_AR1_2CP", n=1000, p=2)
+    
+    summary_df <- rbind(summary_df, data.frame(
+      Condition = cond,
+      Accuracy = round(correct_count / N_sim, 3),
+      Avg_FP = round(total_fp / N_sim, 3),
+      F1_Score = ifelse(cond != "Normal", round(mean(all_F1, na.rm=TRUE), 3), NA),
+      Avg_MAE = ifelse(cond != "Normal", round(mean(all_MAE, na.rm=TRUE), 2), NA),
+      Hausdorff = ifelse(cond != "Normal", round(mean(all_Hausdorff, na.rm=TRUE), 2), NA),
+      ARI = round(mean(all_ARI, na.rm=TRUE), 3)
+    ))
+  }
+  
+  print(summary_df)
+  return(summary_df)
+}
+
+raw_station_coords <- matrix(c(
+  116.41,39.92, 116.397,39.982, 116.339,39.929,
+  116.461,39.937, 116.407,39.866, 116.352,39.878 
+), ncol = 2, byrow = TRUE)
+
+set.seed(2026)
+mc_results <- run_monte_carlo_2cp(N_sim = 5, raw_coords = raw_station_coords)
