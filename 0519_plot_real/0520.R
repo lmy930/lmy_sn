@@ -1,4 +1,3 @@
-
 # ============================================================
 # 实际数据双变量异常识别：SNSeg_Multi + 反距离加权空间差值 + CBB Hotelling 检验
 # 锚点式完整流程版
@@ -13,6 +12,10 @@
 #       突变方式从绝对加减改为乘性比例，保证在对数尺度下
 #       突变强度均匀，不随浓度水平变化。
 #       绘图仍使用原始浓度序列，不受影响。
+#   v4：人工突变改回加法（原始浓度单位）
+#       模拟阶段只需在原始浓度上施加固定偏移即可验证算法，
+#       物理含义清晰（传感器系统性偏低/偏高 δ μg/m³）。
+#       算法内部仍使用对数差值 Z(t)，检验框架不变。
 # ============================================================
 
 rm(list = ls())
@@ -55,14 +58,14 @@ global_seed <- 42
 
 # 【v2】对数差值偏移常数，防止浓度为0时log报错
 # 对高浓度数据（PM10/PM2.5通常>10）影响可忽略
-log_offset <- 1
+log_offset <- 0
 
-# 【v3】乘性突变比例设置
-# ratio < 1：目标站点偏低；ratio > 1：目标站点偏高
-# 例：0.85 表示目标站点系统性偏低约15%
-# 两种人工场景的比例，主流程会用这里的值
-shift_ratio_both <- c(PM10 = 0.90, PM25 = 0.90)  # 情形2：PM10和PM2.5同时偏低
-shift_ratio_pm10 <- c(PM10 = 0.70, PM25 = 1.00)  # 情形3第二个变点：仅PM10偏低
+# 【v4】加法突变设置（原始浓度单位，μg/m³）
+# δ < 0：目标站点系统性偏低；δ > 0：目标站点系统性偏高
+# 建议设为该污染物正常均值的 20%–40%，太小不易检测，太大不像真实异常
+# 两种人工场景的偏移量，主流程会用这里的值
+shift_delta_both <- c(PM10 = -15, PM25 = -10)  # 情形2：PM10和PM2.5同时偏低
+shift_delta_pm10 <- c(PM10 = -20, PM25 =   0)  # 情形3第二个变点：仅PM10偏低
 
 choose_cbb_block_size <- function(L) {
   max(5L, min(as.integer(L), as.integer(round(sqrt(2 * L)))))
@@ -80,7 +83,7 @@ axis_text_size   <- 12
 legend_text_size <- 12
 x_date_breaks    <- "1 day"
 
-out_dir <- file.path(data_dir, "actual_stage2_anomaly_identification_v3")
+out_dir <- file.path(data_dir, "actual_stage2_anomaly_identification_v4")
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
 
@@ -520,15 +523,11 @@ write.csv(base_anchor_table,
 injection_pre_hours <- L
 
 # ============================================================
-# 【v3】apply_mean_shift_to_wide：改为乘性突变
+# 【v4】apply_mean_shift_to_wide：改回加法突变（原始浓度单位）
 #
-# 原来：目标(t) + shift_vec    （绝对加减，与对数尺度不匹配）
-# 现在：目标(t) × shift_vec    （乘性比例，与对数尺度一致）
-#
-# 理由：Z(t)=log(目标)-log(参考)，若对目标乘以ratio，则
-#       Z_after(t) ≈ Z_before(t) + log(ratio)，即均匀偏移。
-#       若用绝对加减，偏移量随浓度水平变化，低浓度时变化更大，
-#       导致突变强度不均匀，与对数尺度的检验框架不匹配。
+# 直接在原始浓度上加减固定值 delta（μg/m³），物理含义清晰：
+# 模拟传感器系统性偏低/偏高固定浓度。
+# 算法内部的对数差值 Z(t) 和 Hotelling 检验框架不受影响。
 # ============================================================
 
 apply_mean_shift_to_wide <- function(wide_dat, cp_index, shift_vec, scope,
@@ -545,11 +544,18 @@ apply_mean_shift_to_wide <- function(wide_dat, cp_index, shift_vec, scope,
   if (length(rows) == 0) return(out)
 
   for (st in stations) {
-    # 【v3关键修改】乘性突变，ratio与对数差值尺度一致
+    # 【v4关键修改】加法突变，在原始浓度上直接加减固定偏移量（单位：μg/m³）
     out[[paste0("PM10_", st)]][rows] <-
-      out[[paste0("PM10_", st)]][rows] * unname(shift_vec["PM10"])
+      out[[paste0("PM10_", st)]][rows] + unname(shift_vec["PM10"])
     out[[paste0("PM25_", st)]][rows] <-
-      out[[paste0("PM25_", st)]][rows] * unname(shift_vec["PM25"])
+      out[[paste0("PM25_", st)]][rows] + unname(shift_vec["PM25"])
+  }
+  # 防止出现负浓度值
+  for (st in stations) {
+    out[[paste0("PM10_", st)]][rows] <-
+      pmax(0, out[[paste0("PM10_", st)]][rows])
+    out[[paste0("PM25_", st)]][rows] <-
+      pmax(0, out[[paste0("PM25_", st)]][rows])
   }
   out
 }
@@ -578,12 +584,12 @@ scenario_list <- list(
       list(
         cp_index    = cp_s2,
         cp_time     = wide_dat$datetime[cp_s2],
-        shift_vec   = shift_ratio_both,   # 乘性比例
+        shift_vec   = shift_delta_both,   # 加法偏移（μg/m³）
         scope       = "target",
         true_label  = "异常",
         change_desc = paste0(
-          "原始第2个候选变点左侧：目标站点PM10×", shift_ratio_both["PM10"],
-          "，PM2.5×", shift_ratio_both["PM25"])
+          "原始第2个候选变点左侧：目标站点PM10+", shift_delta_both["PM10"],
+          "，PM2.5+", shift_delta_both["PM25"])
       )
     )
   ),
@@ -594,21 +600,21 @@ scenario_list <- list(
       list(
         cp_index    = cp_s3_1,
         cp_time     = wide_dat$datetime[cp_s3_1],
-        shift_vec   = shift_ratio_both,   # 乘性比例
+        shift_vec   = shift_delta_both,   # 加法偏移（μg/m³）
         scope       = "target",
         true_label  = "异常",
         change_desc = paste0(
-          "原始第2个候选变点左侧：目标站点PM10×", shift_ratio_both["PM10"],
-          "，PM2.5×", shift_ratio_both["PM25"])
+          "原始第2个候选变点左侧：目标站点PM10+", shift_delta_both["PM10"],
+          "，PM2.5+", shift_delta_both["PM25"])
       ),
       list(
         cp_index    = cp_s3_2,
         cp_time     = wide_dat$datetime[cp_s3_2],
-        shift_vec   = shift_ratio_pm10,   # 乘性比例
+        shift_vec   = shift_delta_pm10,   # 加法偏移（μg/m³）
         scope       = "target",
         true_label  = "异常",
         change_desc = paste0(
-          "原始第3个候选变点左侧：目标站点仅PM10×", shift_ratio_pm10["PM10"])
+          "原始第3个候选变点左侧：目标站点仅PM10+", shift_delta_pm10["PM10"])
       )
     )
   )
@@ -624,8 +630,8 @@ for (sc in scenario_list) {
     cat("  位置 =", sp$cp_index,
         "；时间 =", format(sp$cp_time, "%Y-%m-%d %H:%M"),
         "；范围 =", sp$scope,
-        "；变化 = (PM10×", sp$shift_vec["PM10"],
-        ", PM2.5×", sp$shift_vec["PM25"], ")",
+        "；变化 = (PM10+", sp$shift_vec["PM10"],
+        ", PM2.5+", sp$shift_vec["PM25"], ")",
         "；区间 =", format(wide_dat$datetime[s], "%Y-%m-%d %H:%M"),
         "至", format(wide_dat$datetime[sp$cp_index], "%Y-%m-%d %H:%M"), "\n")
   }

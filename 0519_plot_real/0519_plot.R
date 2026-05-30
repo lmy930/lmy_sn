@@ -310,14 +310,15 @@ ADCODE <- "110000"
 CSV_FILE <- "D:/file/sha/station/station.xlsx"
 OUTPUT_IMAGE <- paste0(TARGET_CITY, "_custom_stations.png")
 
-SELECTED_STATIONS <- c("Dongsi", "Tiantan", "Guanyuan", "Wanshouxigong", "Nongzhanguan", "Aotizhongxin")
+SELECTED_STATIONS <- c( "Tiantan", "Guanyuan", "Wanshouxigong", "Nongzhanguan", "Aotizhongxin",
+                       "Shunyi")
 
 # ============================================================
 # 字体与字号设置：后续主要修改这里即可
 # ============================================================
 
 # 图片标题
-plot_title <- "北京市6个空气质量监测站点分布图"
+plot_title <- "北京市12个空气质量监测站点分布图"
 
 # 中文字体名称
 # Windows 常用："SimHei"、"SimSun"、"Microsoft YaHei"
@@ -349,7 +350,13 @@ city_df <- city_df %>%
     "Guanyuan" = "官园",
     "Wanshouxigong" = "万寿西宫",
     "Nongzhanguan" = "农展馆",
-    "Aotizhongxin" = "奥体中心"
+    "Aotizhongxin" = "奥体中心",
+    "Changping" = "昌平",
+    #"Dingling" = "定陵",
+    "Gucheng" = "古城",
+    "Huairou" = "怀柔",
+    "Shunyi" = "顺义",
+    "Wanliu" = "万柳"
   ))
 
 stations_sf <- st_as_sf(city_df, coords = c("lon", "lat"), crs = 4326)
@@ -453,3 +460,117 @@ ggsave(
 message("成功生成图片: ", OUTPUT_IMAGE)
 
 
+
+
+
+
+
+
+
+
+
+
+# 1. 加载必要的包
+library(leaflet)
+library(dplyr)
+
+# 2. 准备你的数据 (直接复制你原有的数据)
+station_coord <- tibble::tribble(
+  ~station, ~station_zh, ~lon, ~lat,
+  "Dongsi", "东四", 116.417, 39.929,
+  "Tiantan", "天坛", 116.407, 39.886,
+  "Guanyuan", "官园", 116.339, 39.929,
+  "Wanshouxigong", "万寿西宫", 116.352, 39.878,
+  "Nongzhanguan", "农展馆", 116.461, 39.937,
+  "Aotizhongxin", "奥体中心", 116.397, 39.982,
+  "Changping", "昌平", 116.231, 40.217,
+  "Dingling", "定陵", 116.220, 40.292,
+  "Gucheng", "古城", 116.184, 39.914,
+  "Huairou", "怀柔", 116.628, 40.328,
+  "Shunyi", "顺义", 116.655, 40.127,
+  "Wanliu", "万柳", 116.287, 39.987
+)
+
+# 3. 为了直观，我们把你特别关注的"东四"站标记为红色，其他站标记为蓝色
+station_coord <- station_coord %>%
+  mutate(point_color = ifelse(station == "Dongsi", "red", "#3388ff"))
+
+# 4. 生成可视化交互地图
+map <- leaflet(data = station_coord) %>%
+  # 添加一个干净漂亮的底图 (CartoDB底图，颜色较淡，适合突出数据点)
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  # 在地图上添加圆点标记
+  addCircleMarkers(
+    lng = ~lon,               # 经度
+    lat = ~lat,               # 纬度
+    color = ~point_color,     # 边框颜色
+    fillColor = ~point_color, # 填充颜色
+    fillOpacity = 0.8,        # 透明度
+    radius = 6,               # 圆点大小
+    # 鼠标放上去时显示的标签（中文名）
+    label = ~station_zh,      
+    # 标签的样式设置（加大字号，更清楚）
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", "font-size" = "14px", padding = "3px 8px")
+    )
+  )
+
+# 5. 显示地图
+map
+
+
+
+# 1. 加载必要的包
+library(leaflet)
+library(dplyr)
+
+# 2. 准备成都市空气质量国控点数据
+# 这里收录了成都最经典的 8 个环境空气质量国控点
+station_coord <- tibble::tribble(
+  ~station,         ~station_zh,  ~lon,    ~lat,
+  "Jinquanlianghe", "金泉两河",   103.973, 30.7236,
+  "Shilidian",      "十里店",     104.142, 30.6764,
+  "Sanwayao",       "三瓦窑",     104.059, 30.5767,
+  "Shahepu",        "沙河铺",     104.112, 30.6306,
+  #"Caotangsi",      "草堂寺",     104.026, 30.6544,
+  #"Liangjiaxiang",  "梁家巷",     104.074, 30.685,
+  "Junpingjie",      "君平街",     104.043, 30.6556,
+  #"Lingyansi",      "灵岩寺(对照点)", 103.62, 31.0201, # 位于都江堰的远郊清洁对照点
+  "Dashixilu",      "大石西路",   104.022, 30.6558,
+  #"Longquanyiqu",     "龙泉驿区",     104.273, 30.5589,
+  "Jinbolu",        "金博路",     104.011, 30.6931,
+  #"Linjianglu",      "临江路",     104.846, 30.6994,
+  #"Huayang",        "华阳",       104.058, 30.5225,
+  #"Chechengdongqilu", "车城东七路", 104.239, 30.5319,
+  #"Qingbaijiangjishifenyuan", "青白江技师分院", 104.385, 30.7453,
+  #"Kexuecheng",      "科学城",     104.079, 30.4072
+)
+
+# 3. 假设你特别关注的站点是"三瓦窑" (Sanwayao)，将其标记为红色，其他标记为蓝色
+target_station_name <- "Sanwayao" 
+
+station_coord <- station_coord %>%
+  mutate(point_color = ifelse(station == target_station_name, "red", "#3388ff"))
+
+# 4. 生成可视化交互地图
+map <- leaflet(data = station_coord) %>%
+  # 添加一个干净漂亮的底图 (CartoDB底图，颜色较淡，不抢戏)
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  # 在地图上添加圆点标记
+  addCircleMarkers(
+    lng = ~lon,               # 经度
+    lat = ~lat,               # 纬度
+    color = ~point_color,     # 边框颜色
+    fillColor = ~point_color, # 填充颜色
+    fillOpacity = 0.8,        # 透明度
+    radius = 6,               # 圆点大小
+    # 鼠标放上去时显示的标签（中文名）
+    label = ~station_zh,      
+    # 标签的样式设置（加大字号，更清楚）
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", "font-size" = "14px", padding = "3px 8px")
+    )
+  )
+
+# 5. 显示地图
+map

@@ -554,7 +554,6 @@ weighted_neighbors_equal <- function(
   colnames(ref_mat) <- colnames(data_list[[target_idx]])
   ref_mat
 }
-
 build_residual_window_raw <- function(
     data_list_raw,
     station_info,
@@ -582,10 +581,16 @@ build_residual_window_raw <- function(
     target_station = target_station
   )
 
-  Z_raw <- win_list[[target_idx]] - ref_mat
+  target_mat <- win_list[[target_idx]]
+
+  # 对数空间差值：
+  # Z(t) = log(目标站点(t) + log_offset) - log(临近站点加权值(t) + log_offset)
+  Z_log <- log(target_mat + log_offset) - log(ref_mat + log_offset)
+
+  colnames(Z_log) <- paste0("log比值_", colnames(target_mat))
 
   list(
-    Z_raw = Z_raw,
+    Z_raw = Z_log,
     s_idx = s_idx,
     e_idx = e_idx
   )
