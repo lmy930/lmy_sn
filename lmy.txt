@@ -1,0 +1,13 @@
+# 1. 加载 SNSeg 包
+library(SNSeg)
+
+# 2. 提取单维度（Univariate）和多维度（Multivariate）的阈值表
+table_univariate <- SNSeg::critical_values_single
+table_multivariate <- SNSeg::critical_values_multi
+
+# 3. 将这两个表格保存为 CSV 文件（保存在您的当前工作路径下）
+# 这样您可以用 Excel 打开，直接复制粘贴到 Word 中生成三线表
+write.csv(table_univariate, "Table_Univariate_Thresholds.csv", row.names = FALSE)
+write.csv(table_multivariate, "Table_Multivariate_Thresholds.csv", row.names = FALSE)
+
+# 提示：如果您不知道文件保存在哪了，可以运行 getwd() 查看路径
